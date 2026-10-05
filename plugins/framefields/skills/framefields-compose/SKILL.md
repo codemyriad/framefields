@@ -13,6 +13,8 @@ Import everything from the [`framefields`](https://www.npmjs.com/package/framefi
 
 Every composition is defined as a tree of layout nodes compiled into a deterministic execution program: `(composition, frame) → pixels`.
 
+**Before building a camera-driven film** (a large world panned and zoomed instead of cut scenes), or when using paths, motion blur, effects or many nodes, read [`cheatsheet.md`](cheatsheet.md). It has verified recipes and the limits that are not obvious from the API: the 128-keyframe cap, blur when zooming past 1.0, effects that only apply to media nodes, and known schema bugs.
+
 ---
 
 ## Architecture & Core Concepts
