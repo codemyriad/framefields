@@ -367,6 +367,21 @@ describe("startPreview", () => {
 		expect(opened).toEqual([first.url]);
 	}, 10_000);
 
+	it("keeps serving when the caller's open function throws", async () => {
+		const lines: string[] = [];
+		const open = () => {
+			throw new Error("no browser here");
+		};
+		const session = await start(
+			{ entry },
+			{ open, port: 0, log: (l) => lines.push(l) },
+		);
+		expect(session.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/$/);
+		expect(lines).toContain(
+			`[framefields preview] could not open ${session.url}: no browser here`,
+		);
+	});
+
 	it("a new preview of the project takes over the port", async () => {
 		const first = await start({ entry }, { open: false, port: 0 });
 		const port = Number(new URL(first.url).port);
@@ -515,10 +530,9 @@ describe("exportPreview", () => {
 		expect(fs.existsSync(path.join(out, "assets", "sub"))).toBe(false);
 
 		const intro = await read(path.join(out, "intro", "index.html"));
-		expect(pageConfig(intro)).toMatchObject({
-			audio: "/assets/voice.wav",
-			base: "/",
-		});
+		expect(pageConfig(intro)).toMatchObject({ base: "/" });
+		// The shared file is used in place, and still busts the cache when it changes.
+		expect(pageConfig(intro).audio).toMatch(/^\/assets\/voice\.wav\?v=\w+$/);
 		expect(
 			JSON.parse(await read(path.join(out, "intro", "meta.json"))),
 		).toMatchObject({
@@ -530,6 +544,21 @@ describe("exportPreview", () => {
 		expect(await read(path.join(out, "outro", "player.js"))).toContain(
 			'"/framefields-engine/player.js"',
 		);
+
+		// Exporting the same sources again writes the same files.
+		const before = await read(path.join(out, "intro", "index.html"));
+		await exportPreview(
+			{
+				intro: { entry: comp, title: "Intro" },
+				outro: { entry: pathToFileURL(comp), audio: false },
+			},
+			{
+				outDir: out,
+				audio: { file: "assets/voice.wav", peaks: [0.5, 1] },
+				files: ["assets/data.json", "assets/voice.wav"],
+			},
+		);
+		expect(await read(path.join(out, "intro", "index.html"))).toBe(before);
 	}, 60_000);
 
 	it("refuses files outside the project, and names that clash", async () => {
