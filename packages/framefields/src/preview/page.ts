@@ -1,11 +1,43 @@
 /**
- * Single-file preview UI served by `startPreview`. No framework, no build step.
- * The page script avoids template literals so it can live inside this one.
+ * Single-file preview UI served by `startPreview` and written by
+ * `exportPreview`. No framework, no build step. The page script avoids
+ * template literals so it can live inside this one.
  */
-export const previewPage = /* html */ `<!doctype html>
+
+/** What the page loads, and how it plays the composition. */
+export interface PreviewPageConfig {
+	/** URL of the composition's size and timing, as JSON. */
+	meta: string;
+	/** URL of the soundtrack. */
+	audio: string;
+	/** URL of the composition's bundle. */
+	player: string;
+	/**
+	 * Served by `startPreview`: the page reloads into the next preview, sends
+	 * its errors to the terminal and keeps notes. Off for a static export.
+	 */
+	live: boolean;
+	/** Base URL for the page's relative URLs, e.g. fonts found by family. */
+	base?: string;
+	/**
+	 * A static export's files: their size by URL path, so `fs.existsSync` and
+	 * `fs.statSync` in the composition work without a server.
+	 */
+	files?: Record<string, number>;
+	/** Height to render at; the composition's own when unset. */
+	height?: number;
+	/** "buffered" (the default) or "realtime"; see `PreviewPlaybackOptions`. */
+	playback?: "buffered" | "realtime";
+	/** Show the frame rate playback reaches. */
+	showFps?: boolean;
+}
+
+/** The page, for one composition. */
+export function previewPage(config: PreviewPageConfig): string {
+	return /* html */ `<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
+<meta charset="utf-8">${config.base ? `\n<base href="${attr(config.base)}">` : ""}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>framefields preview</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 512 512%22%3E%3Cg fill=%22none%22 stroke=%22%233B82F6%22 stroke-linecap=%22round%22%3E%3Cpath d=%22M184 56H86q-30 0-30 30v98M328 56h98q30 0 30 30v98M184 456H86q-30 0-30-30v-98M328 456h98q30 0 30-30v-98%22 stroke-width=%2234%22/%3E%3Cpath d=%22M176 182v148m0-148c0 74 60 74 100 74%22 stroke-width=%2228%22/%3E%3C/g%3E%3Cg fill=%22%233B82F6%22%3E%3Ccircle cx=%22176%22 cy=%22172%22 r=%2232%22/%3E%3Ccircle cx=%22176%22 cy=%22340%22 r=%2232%22/%3E%3Cpath d=%22M284 200l78 56-78 56z%22 stroke=%22%233B82F6%22 stroke-width=%2234%22 stroke-linejoin=%22round%22/%3E%3C/g%3E%3C/svg%3E">
@@ -44,9 +76,9 @@ export const previewPage = /* html */ `<!doctype html>
     font: 13.5px/1.45 var(--font); -webkit-font-smoothing: antialiased;
     font-feature-settings: "cv11", "ss03";
   }
-  button, input { font: inherit; color: inherit; }
-  button { cursor: pointer; }
-  button:focus-visible, input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  button, input, select { font: inherit; color: inherit; }
+  button, select { cursor: pointer; }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   .tnum { font-variant-numeric: tabular-nums; }
   .grow { flex: 1; }
   .spinner {
@@ -136,6 +168,12 @@ export const previewPage = /* html */ `<!doctype html>
   .timecode { display: flex; align-items: baseline; gap: 5px; margin-left: 8px; font-size: 13px; white-space: nowrap; }
   .timecode .dim { color: var(--ink-3); }
   .timecode .frame { color: var(--ink-3); font-size: 11.5px; margin-left: 6px; }
+  .fps { margin-left: 10px; color: var(--ink-3); font-size: 11.5px; white-space: nowrap; }
+  .res {
+    height: 28px; padding: 0 6px; margin-right: 6px; border-radius: 7px; font-size: 12px;
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink-2);
+  }
+  .res:hover { color: var(--ink); }
   input[type="range"].slider { -webkit-appearance: none; appearance: none; width: 72px; height: 4px; border-radius: 2px; background: var(--line-2); margin: 0 8px 0 0; }
   input[type="range"].slider::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%; background: var(--ink); border: 0; }
   input[type="range"].slider::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: var(--ink); border: 0; }
@@ -324,6 +362,7 @@ export const previewPage = /* html */ `<!doctype html>
       <span id="tcNow">0:00.00</span><span class="dim">/</span><span class="dim" id="tcDur">0:00.00</span>
       <span class="frame" id="tcFrame">frame 0</span>
     </div>
+    <span class="fps tnum" id="fps" role="status" hidden></span>
     <span class="grow"></span>
     <button class="btn notes-btn" id="notesBtn" title="Notes" aria-haspopup="dialog" aria-expanded="false" hidden>
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M3 2.75h10a1.25 1.25 0 0 1 1.25 1.25v6.5A1.25 1.25 0 0 1 13 11.75H7.5L4.5 14v-2.25H3A1.25 1.25 0 0 1 1.75 10.5V4A1.25 1.25 0 0 1 3 2.75z"/></svg>
@@ -341,6 +380,7 @@ export const previewPage = /* html */ `<!doctype html>
       <div class="np-list" id="notesList"></div>
       <div class="np-foot" id="notesFoot"></div>
     </div>
+    <select class="res" id="res" title="Preview resolution" aria-label="Preview resolution" hidden></select>
     <button class="icon-btn" id="mute" title="Mute" aria-label="Mute" disabled>
       <svg id="volIcon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6h2.2L8 3.2v9.6L4.7 10H2.5z" fill="currentColor" stroke="none"/><path d="M10.6 5.6a3.4 3.4 0 0 1 0 4.8M12.4 3.9a5.8 5.8 0 0 1 0 8.2"/></svg>
       <svg id="muteIcon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" style="display:none"><path d="M2.5 6h2.2L8 3.2v9.6L4.7 10H2.5z" fill="currentColor" stroke="none"/><path d="M10.5 6l3.5 4M14 6l-3.5 4"/></svg>
@@ -368,7 +408,18 @@ export const previewPage = /* html */ `<!doctype html>
 
 <script>
 (function () {
+  var CONFIG = ${scriptJson(config)};
   var $ = function (id) { return document.getElementById(id); };
+
+  // ── Settings: the preview's own, unless the address says otherwise
+  // (?height=360 or ?height=full, ?playback=realtime, ?fps=1) ──
+  var params = new URLSearchParams(location.search);
+  var heightParam = params.get("height"), playbackParam = params.get("playback"), fpsParam = params.get("fps");
+  var renderHeight = heightParam === "full" ? 0 : Number(heightParam) > 0 ? Math.round(Number(heightParam)) : CONFIG.height || 0;
+  var realtime = (playbackParam === "realtime" || playbackParam === "buffered" ? playbackParam : CONFIG.playback) === "realtime";
+  var showFps = fpsParam != null ? fpsParam !== "0" && fpsParam !== "false" : !!CONFIG.showFps;
+  // Read by the player when the composition's bundle starts it.
+  window.framefieldsPlayerOptions = { height: renderHeight || undefined };
   var stage = $("stage"), timeline = $("timeline"), tlInner = $("tlInner");
 
   var meta = null, session = null, frame = 0, shown = -1, playing = false, playToken = 0;
@@ -402,6 +453,7 @@ export const previewPage = /* html */ `<!doctype html>
     var text = parts.map(errText).join(" ").trim(), key = level + text.replace(/\\d+/g, "#");
     if (!text || reportedKeys.has(key) || reportedKeys.size > 100) return;
     reportedKeys.add(key);
+    if (!CONFIG.live) return;
     fetch("/@framefields/log", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -459,7 +511,7 @@ export const previewPage = /* html */ `<!doctype html>
     return 0;
   }
   function keepPosition() {
-    var at = frame > 0 ? "#t=" + Number((frame / meta.fps).toFixed(3)) : location.pathname;
+    var at = location.pathname + location.search + (frame > 0 ? "#t=" + Number((frame / meta.fps).toFixed(3)) : "");
     try { history.replaceState(null, "", at); } catch (e) {}
   }
 
@@ -532,7 +584,7 @@ export const previewPage = /* html */ `<!doctype html>
       audio.gain.connect(audio.ctx.destination);
       applyVolume();
     }
-    fetch("/audio")
+    fetch(CONFIG.audio)
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.arrayBuffer(); })
       .then(function (data) { return audio.ctx.decodeAudioData(data); })
       .then(function (buf) { audio.buffer = buf; setAudioStatus("ready"); })
@@ -594,14 +646,54 @@ export const previewPage = /* html */ `<!doctype html>
     if (draft && !draft.text.trim()) cancelDraft();
     if (notesOn) renderPins();
     if (frame >= last()) frame = 0;
-    playRealtime(alive).finally(function () { if (token === playToken && playing) pause(); });
+    (realtime ? playDueFrames : playRealtime)(alive).finally(function () { if (token === playToken && playing) pause(); });
   }
   function stop() {
     playing = false;
     stopClock();
     setStalled(false);
     setPlayingUi(false);
+    meter.stop();
+    renderFps();
   }
+
+  // ── Frame rate reached: distinct frames shown per second while playing,
+  // over the last 2 s, stalls included. The film's own rate is in meta ──
+  var meter = (function () {
+    var started = null, lastFrame = null, samples = [], lastFps = null;
+    function read() {
+      if (started === null) return { state: "paused", fps: lastFps };
+      var now = performance.now(), elapsed = Math.min(2000, now - started);
+      samples = samples.filter(function (t) { return t > now - 2000; });
+      if (elapsed < 1000) return { state: "measuring", fps: null };
+      return { state: "playing", fps: (samples.length * 1000) / elapsed };
+    }
+    return {
+      read: read,
+      running: function () { return started !== null; },
+      start: function () { started = performance.now(); lastFrame = null; samples = []; },
+      stop: function () {
+        if (started === null) return;
+        var r = read();
+        if (r.state === "playing") lastFps = r.fps;
+        started = null;
+        samples = [];
+      },
+      record: function (f) {
+        if (started === null || f === lastFrame) return;
+        lastFrame = f;
+        samples.push(performance.now());
+      }
+    };
+  })();
+  function renderFps() {
+    var r = meter.read(), out = $("fps");
+    out.hidden = !showFps || (r.state === "paused" && r.fps === null);
+    if (out.hidden) return;
+    out.textContent = r.state === "measuring" ? "… fps" : r.fps.toFixed(1) + " fps";
+    out.title = (r.state === "paused" ? "Frame rate the last playback reached" : "Frame rate playback reaches") + (meta ? "; the film runs at " + meta.fps + " fps" : "");
+  }
+  setInterval(function () { if (playing) renderFps(); }, 500);
   // Pausing settles on exactly the frame the timecode shows.
   function pause() { stop(); keepPosition(); show(frame).then(scheduleWarm); }
   function togglePlay() { playing ? pause() : play(); }
@@ -647,6 +739,7 @@ export const previewPage = /* html */ `<!doctype html>
   // Resolves true when the buffer ran dry, false at the end or when stopped.
   async function runClock(alive) {
     var f0 = frame, clock = startClock(f0), onScreen = -1;
+    if (!meter.running()) meter.start();
     while (alive()) {
       var due = Math.min(last(), f0 + Math.floor(clock() * meta.fps));
       if (due !== onScreen) {
@@ -656,6 +749,7 @@ export const previewPage = /* html */ `<!doctype html>
           return true;
         }
         onScreen = shown = due;
+        meter.record(due);
       }
       setTime(due);
       showBufferedRange();
@@ -664,6 +758,33 @@ export const previewPage = /* html */ `<!doctype html>
       await sleep(4);
     }
     return false;
+  }
+
+  // Real time (playback: "realtime"): nothing is rendered ahead. Each turn
+  // draws the frame due on the clock straight to the screen, and frames
+  // that drawing missed are skipped. Playback starts at once and the sound
+  // keeps its speed; a device that can't keep up shows fewer frames.
+  async function playDueFrames(alive) {
+    // A soundtrack still downloading would start late: wait for it.
+    if (audio.state === "loading") {
+      setStalled(true);
+      while (alive() && audio.state === "loading") await sleep(50);
+      setStalled(false);
+      if (!alive()) return;
+    }
+    var f0 = frame, clock = startClock(f0), presented = -1;
+    meter.start();
+    renderFps();
+    while (alive()) {
+      var due = Math.min(last(), f0 + Math.floor(clock() * meta.fps));
+      if (due === presented) { await sleep(4); continue; }
+      setTime(due);
+      var drawn = await player.render(due);
+      if (!alive()) return;
+      presented = shown = drawn;
+      meter.record(drawn);
+      if (drawn >= last()) return;
+    }
   }
 
   // ── Timeline ──
@@ -1124,6 +1245,7 @@ export const previewPage = /* html */ `<!doctype html>
     pause: function () { if (playing) pause(); },
     /** Where the preview is: loading, ready or error, and what it shows. */
     state: function () {
+      var rate = meter.read().fps;
       return {
         state: pageState,
         error: pageState === "error" ? $("stageMsg").textContent : null,
@@ -1133,7 +1255,14 @@ export const previewPage = /* html */ `<!doctype html>
         buffering: stalled,
         audio: audio.state,
         connected: !offline,
-        meta: meta && { title: meta.title, width: meta.width, height: meta.height, fps: meta.fps, frameCount: meta.frameCount, duration: Number((last() / meta.fps).toFixed(3)) }
+        // Frames shown per second over the last 2 s of playback (the last
+        // playback's while paused), and how long the last frame took to draw.
+        playbackFps: rate == null ? null : Number(rate.toFixed(1)),
+        renderMs: player ? Math.round(player.lastRenderMs) : null,
+        meta: meta && {
+          title: meta.title, width: meta.width, height: meta.height, fps: meta.fps, frameCount: meta.frameCount, duration: Number((last() / meta.fps).toFixed(3)),
+          renderWidth: player ? player.meta.width : null, renderHeight: player ? player.meta.height : null
+        }
       };
     }
   };
@@ -1151,12 +1280,45 @@ export const previewPage = /* html */ `<!doctype html>
     meta = m;
     document.title = m.title + " · preview";
     $("title").textContent = m.title;
-    $("spec").textContent = m.width + "×" + m.height + " · " + m.fps + " fps · " + fmt(last());
+    renderSpec();
     $("tcDur").textContent = fmt(last());
     stage.style.setProperty("--ar", m.width + " / " + m.height);
     stage.style.setProperty("--ar-n", String(m.width / m.height));
     renderRuler();
+    renderResolutions();
   }
+  // The composition's size, and the size it is drawn at when smaller.
+  function renderSpec() {
+    var size = meta.width + "×" + meta.height, drawn = player && player.meta;
+    if (drawn && (drawn.width !== meta.width || drawn.height !== meta.height)) size += " shown at " + drawn.width + "×" + drawn.height;
+    $("spec").textContent = size + " · " + meta.fps + " fps · " + fmt(last());
+  }
+
+  // ── Resolution: a smaller picture draws faster. Choosing one reloads the
+  // page at the same moment, with ?height= in the address ──
+  function renderResolutions() {
+    var select = $("res"), options = [["full", "Full size"]];
+    [2160, 1440, 1080, 720, 540, 360, 240].forEach(function (h) {
+      if (h < meta.height) options.push([String(h), h + "p"]);
+    });
+    var current = renderHeight && renderHeight < meta.height ? String(renderHeight) : "full";
+    if (!options.some(function (o) { return o[0] === current; })) options.push([current, current + "p"]);
+    select.replaceChildren();
+    options.forEach(function (o) {
+      var opt = el("option", null, o[1]);
+      opt.value = o[0];
+      select.append(opt);
+    });
+    select.value = current;
+    select.hidden = options.length < 2;
+  }
+  $("res").addEventListener("change", function (e) {
+    if (playing) stop();
+    keepPosition();
+    var p = new URLSearchParams(location.search);
+    p.set("height", e.target.value);
+    location.replace(location.pathname + "?" + p.toString() + location.hash);
+  });
 
   new ResizeObserver(function () {
     if (!meta) return;
@@ -1167,30 +1329,32 @@ export const previewPage = /* html */ `<!doctype html>
 
   // When the preview command ends the event stream drops and the browser keeps
   // retrying. The next preview of this project (same port) says hello with a
-  // new session, and this tab reloads into it.
-  var events = new EventSource("/events");
-  events.addEventListener("hello", function (e) {
-    var s = JSON.parse(e.data).session;
-    if (session && s !== session) { location.reload(); return; }
-    offline = false;
-    renderChip();
-  });
-  events.addEventListener("error", function () {
-    if (!meta) return;
-    if (playing) { stop(); keepPosition(); }
-    offline = true;
-    renderChip();
-  });
-  events.addEventListener("notes", function (e) {
-    notes = JSON.parse(e.data);
-    if (openId != null && !noteById(openId)) closePop();
-    renderNotes();
-  });
-  events.addEventListener("audio", function (e) {
-    if (meta) loadAudio(JSON.parse(e.data));
-  });
+  // new session, and this tab reloads into it. A static export has no server.
+  if (CONFIG.live) {
+    var events = new EventSource("/events");
+    events.addEventListener("hello", function (e) {
+      var s = JSON.parse(e.data).session;
+      if (session && s !== session) { location.reload(); return; }
+      offline = false;
+      renderChip();
+    });
+    events.addEventListener("error", function () {
+      if (!meta) return;
+      if (playing) { stop(); keepPosition(); }
+      offline = true;
+      renderChip();
+    });
+    events.addEventListener("notes", function (e) {
+      notes = JSON.parse(e.data);
+      if (openId != null && !noteById(openId)) closePop();
+      renderNotes();
+    });
+    events.addEventListener("audio", function (e) {
+      if (meta) loadAudio(JSON.parse(e.data));
+    });
+  }
 
-  fetch("/meta").then(function (r) { return r.json(); }).then(function (m) {
+  fetch(CONFIG.meta).then(function (r) { return r.json(); }).then(function (m) {
     session = m.session;
     applyMeta(m);
     notesOn = !!m.notesDir;
@@ -1207,6 +1371,7 @@ export const previewPage = /* html */ `<!doctype html>
     if (!window.framefieldsPlayer) return;
     window.framefieldsPlayer.then(function (p) {
       player = p;
+      renderSpec();
       $("play").disabled = false;
       show(frame).then(function () {
         pageState = "ready";
@@ -1229,7 +1394,20 @@ export const previewPage = /* html */ `<!doctype html>
   window.addEventListener("unhandledrejection", function (e) { report("error", [e.reason]); });
 })();
 </script>
-<script type="module" src="/@framefields/player.js"></script>
+<script type="module" src="${attr(config.player)}"></script>
 </body>
 </html>
 `;
+}
+
+function attr(value: string): string {
+	return value
+		.replaceAll("&", "&amp;")
+		.replaceAll('"', "&quot;")
+		.replaceAll("<", "&lt;");
+}
+
+/** JSON that can sit inside a script element. */
+function scriptJson(value: unknown): string {
+	return JSON.stringify(value).replaceAll("<", "\\u003c");
+}

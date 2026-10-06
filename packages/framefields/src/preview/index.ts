@@ -40,7 +40,37 @@ interface PreviewTarget {
 	height?: number;
 }
 
-export interface PreviewOptions {
+/**
+ * How the page plays the composition. Each can be changed in the page's
+ * address too: `?height=360` (or `?height=full`), `?playback=realtime`,
+ * `?fps=1`.
+ */
+export interface PreviewPlaybackOptions {
+	/**
+	 * Height in pixels to draw the preview at, e.g. 360 for a light one on a
+	 * slow device; the width follows the aspect ratio. The layout is scaled as
+	 * a whole, so positions and timing stay as written, though effects sized
+	 * in pixels (blur, grain) can look stronger. Defaults to the composition's
+	 * own size. The page also offers a resolution menu.
+	 */
+	height?: number;
+	/**
+	 * `"buffered"` (the default) renders frames ahead and shows every one at
+	 * the film's frame rate: playback starts once 3 s are ready, and picture
+	 * and sound hold whenever rendering falls behind. `"realtime"` renders
+	 * nothing ahead: it draws the frame due now and skips the ones it missed,
+	 * so playback starts at once and the sound never waits. Use it where the
+	 * device can't keep up, e.g. a preview shared with others.
+	 */
+	playback?: "buffered" | "realtime";
+	/**
+	 * Show the frame rate playback reaches, measured over the last 2 s, next
+	 * to the timecode. `window.framefieldsPreview.state()` reports it either way.
+	 */
+	showFps?: boolean;
+}
+
+export interface PreviewOptions extends PreviewPlaybackOptions {
 	/**
 	 * Port to listen on. Defaults to a port derived from the working directory,
 	 * so every preview of a project lands on the same URL and an open tab picks
@@ -195,6 +225,15 @@ export async function startPreview(
 
 	const target = await loadTarget(entry, exportName);
 	const meta = await resolveMeta(target, title, session, notes?.dir ?? null);
+	const page = previewPage({
+		meta: "/meta",
+		audio: "/audio",
+		player: PLAYER_PATH,
+		live: true,
+		height: options.height,
+		playback: options.playback,
+		showFps: options.showFps,
+	});
 	// The project's own code, bundled against the browser engine; the engine
 	// itself is prebuilt (or built once, running from source).
 	let bundle: Promise<string> | undefined;
@@ -308,7 +347,7 @@ export async function startPreview(
 					"content-type": "text/html; charset=utf-8",
 					"cache-control": "no-store",
 				});
-				res.end(previewPage);
+				res.end(page);
 				return;
 			}
 			if (req.method === "GET" && url.pathname === "/meta") {

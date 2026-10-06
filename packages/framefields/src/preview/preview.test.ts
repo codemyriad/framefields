@@ -4,10 +4,27 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { Composition, Layer } from "../index.js";
 import { buildEngine, prebuiltEngineDir } from "./bundle.js";
 import { type PreviewSession, startPreview } from "./index.js";
+import { previewPage } from "./page.js";
+import { scaleToHeight } from "./scale.js";
 
 const entry = new URL("./fixtures/comp.ts", import.meta.url);
+
+/** The settings a page was written with. */
+function pageConfig(page: string): Record<string, unknown> {
+	const json = /var CONFIG = (.*);\n/.exec(page)?.[1];
+	if (!json) throw new Error("no CONFIG in the page");
+	return JSON.parse(json);
+}
+
+/** The page's inline script, compiled (not run) to catch syntax errors. */
+function compileScript(page: string): void {
+	const script = /<script>\n([\s\S]*?)<\/script>/.exec(page)?.[1];
+	if (!script) throw new Error("no inline script in the page");
+	new Function(script);
+}
 
 describe("startPreview", () => {
 	const sessions: PreviewSession[] = [];
@@ -37,7 +54,15 @@ describe("startPreview", () => {
 
 		const page = await (await fetch(session.url)).text();
 		expect(page).toContain('id="canvas"');
-		expect(page).toContain("/@framefields/player.js");
+		expect(page).toContain(
+			'<script type="module" src="/@framefields/player.js"></script>',
+		);
+		expect(pageConfig(page)).toEqual({
+			meta: "/meta",
+			audio: "/audio",
+			player: "/@framefields/player.js",
+			live: true,
+		});
 
 		const player = await fetch(`${session.url}@framefields/player.js`);
 		expect(player.headers.get("content-type")).toContain("javascript");
@@ -45,6 +70,26 @@ describe("startPreview", () => {
 		expect(code).toContain("startPlayer");
 		expect(code).not.toContain("Could not build the preview");
 	}, 60_000);
+
+	it("writes the playback options into the page", async () => {
+		const session = await start(
+			{ entry },
+			{
+				open: false,
+				port: 0,
+				height: 360,
+				playback: "realtime",
+				showFps: true,
+			},
+		);
+		const page = await (await fetch(session.url)).text();
+		expect(pageConfig(page)).toMatchObject({
+			height: 360,
+			playback: "realtime",
+			showFps: true,
+		});
+		compileScript(page);
+	});
 
 	it("serves the browser engine the project bundle imports", async () => {
 		const session = await start({ entry }, { open: false, port: 0 });
@@ -54,9 +99,7 @@ describe("startPreview", () => {
 		expect(player.headers.get("content-type")).toContain("javascript");
 		expect(await player.text()).toContain("startPlayer");
 
-		const shim = await fetch(
-			`${session.url}@framefields/engine/shims/path.js`,
-		);
+		const shim = await fetch(`${session.url}@framefields/engine/shims/path.js`);
 		expect(shim.status).toBe(200);
 		expect(await shim.text()).toContain("export");
 
@@ -332,6 +375,56 @@ describe("startPreview", () => {
 		expect(await first.closed).toBe("replaced");
 		expect(second.url).toBe(first.url);
 		expect((await fetch(`${second.url}meta`)).status).toBe(200);
+	});
+});
+
+describe("previewPage", () => {
+	it("keeps its settings inside the script element", () => {
+		const page = previewPage({
+			meta: "meta.json",
+			audio: "audio.wav",
+			player: 'player.js?v="1"',
+			live: false,
+			base: "/films/a/",
+			files: { "/films/a/x</script>.json": 3 },
+		});
+		expect(page).not.toContain("x</script>");
+		expect(pageConfig(page).files).toEqual({ "/films/a/x</script>.json": 3 });
+		expect(page).toContain('<base href="/films/a/">');
+		expect(page).toContain('src="player.js?v=&quot;1&quot;"');
+		compileScript(page);
+	});
+});
+
+describe("scaleToHeight", () => {
+	it("draws the layout smaller, as a whole", () => {
+		const comp = new Composition({ width: 1920, height: 1080, fps: 30 });
+		const title = Layer.box({ id: "title", x: 100, y: 50, width: 400 });
+		comp.add(title);
+		expect(scaleToHeight(comp, 360)).toBe(true);
+		expect([comp.width, comp.height]).toEqual([640, 360]);
+		expect(comp.children).toHaveLength(1);
+		expect(comp.children[0]).toMatchObject({
+			kind: "box",
+			width: 1920,
+			height: 1080,
+			anchorX: 0,
+			anchorY: 0,
+			scale: 1 / 3,
+			children: [title],
+		});
+	});
+
+	it("keeps sizes even, and leaves a composition at or below the height", () => {
+		const odd = new Composition({ width: 1000, height: 1000, fps: 30 });
+		scaleToHeight(odd, 333);
+		expect([odd.width, odd.height]).toEqual([334, 334]);
+
+		const small = new Composition({ width: 640, height: 360, fps: 30 });
+		expect(scaleToHeight(small, 360)).toBe(false);
+		expect(scaleToHeight(small, 720)).toBe(false);
+		expect([small.width, small.height]).toEqual([640, 360]);
+		expect(scaleToHeight({ fps: 10 }, 240)).toBe(false);
 	});
 });
 
