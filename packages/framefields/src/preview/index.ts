@@ -53,8 +53,11 @@ export interface PreviewOptions {
 	 * Also open the page in the system's default browser. Off by default: the
 	 * caller shows the URL where it suits, e.g. an agent app's own browser
 	 * pane. Skipped when a tab from an earlier preview reconnects on its own.
+	 *
+	 * A function opens it your way instead, e.g. in a browser started with
+	 * particular flags. It gets the URL, and is skipped in the same way.
 	 */
-	open?: boolean;
+	open?: boolean | ((url: string) => void);
 	/** Title shown in the page header. */
 	title?: string;
 	/** Mix and play the composition's audio. Defaults to true. */
@@ -538,7 +541,7 @@ export async function startPreview(
 	// Build the page's bundle and mix the soundtrack while the browser opens.
 	void playerBundle().catch(() => {});
 	startAudio();
-	if (options.open === true) {
+	if (options.open) {
 		// A tab from the last preview reconnects within ~1 s and reloads itself;
 		// only open a new one when nobody comes back.
 		const reconnected = await new Promise<boolean>((resolve) => {
@@ -550,7 +553,10 @@ export async function startPreview(
 			if (sseClients.size > 0) onClient();
 		});
 		onClient = undefined;
-		if (!reconnected) openBrowser(url);
+		if (!reconnected) {
+			if (typeof options.open === "function") options.open(url);
+			else openBrowser(url);
+		}
 	}
 
 	return { url, closed, close: () => close() };
