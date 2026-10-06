@@ -796,7 +796,8 @@ export function previewPage(config: PreviewPageConfig): string {
       var due = Math.min(last(), f0 + Math.floor(clock() * meta.fps));
       if (due === presented) { await sleep(4); continue; }
       setTime(due);
-      var drawn = await player.render(due);
+      // Each frame is drawn once; caching it would cost a texture and a copy per frame.
+      var drawn = await player.render(due, { cache: false });
       if (!alive()) return;
       presented = shown = drawn;
       meter.record(drawn);

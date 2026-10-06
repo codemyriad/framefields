@@ -50,8 +50,13 @@ export interface PlayerMeta {
 export interface PreviewPlayer {
 	meta: PlayerMeta;
 	canvas: HTMLCanvasElement;
-	/** Draws a frame. Calls made while one is drawing collapse to the latest. */
-	render(frame: number): Promise<number>;
+	/**
+	 * Draws a frame. Calls made while one is drawing collapse to the latest.
+	 * `cache: false` leaves the drawn frame out of the step/scrub cache: for
+	 * real-time playback, which draws every frame once and would otherwise pay
+	 * a texture and a copy per frame.
+	 */
+	render(frame: number, options?: { cache?: boolean }): Promise<number>;
 	/** Milliseconds the last frame took to draw. */
 	lastRenderMs: number;
 	/** True when the program runs vision models (worth analysing ahead). */
@@ -199,6 +204,7 @@ async function createPlayer(
 	let first = true;
 	let drawing: Promise<void> | null = null;
 	let wanted: number | null = null;
+	let wantedCached = true;
 	let waiters: Array<(f: number) => void> = [];
 
 	let offscreen: GPUTexture | undefined;
@@ -266,7 +272,11 @@ async function createPlayer(
 		}
 	}
 
-	async function draw(frame: number, toScreen = true): Promise<void> {
+	async function draw(
+		frame: number,
+		toScreen = true,
+		cache = toScreen,
+	): Promise<void> {
 		const renderer = getRenderer2D(device, surface.colorFormat);
 		const ctx: RenderContextValue = { device, renderer, surface };
 		const w = surface.width;
@@ -339,7 +349,7 @@ async function createPlayer(
 			props,
 		);
 		let cacheTex: GPUTexture | undefined;
-		if (toScreen) {
+		if (cache) {
 			cacheTex = newRenderCacheTexture();
 			encoder.copyTextureToTexture({ texture: tex }, { texture: cacheTex }, [
 				w,
@@ -359,6 +369,7 @@ async function createPlayer(
 		drawing = (async () => {
 			while (wanted !== null) {
 				const f = wanted;
+				const cache = wantedCached;
 				wanted = null;
 				const started = performance.now();
 				try {
@@ -367,7 +378,7 @@ async function createPlayer(
 						blitter.blit(cached, surface.getCurrentTexture());
 						surface.present();
 					} else {
-						await draw(f);
+						await draw(f, true, cache);
 					}
 				} catch (err) {
 					console.error("[framefields] frame", f, err);
@@ -505,8 +516,9 @@ async function createPlayer(
 		canvas,
 		lastRenderMs: 0,
 		hasVision,
-		render(frame) {
+		render(frame, options) {
 			wanted = frame;
+			wantedCached = options?.cache ?? true;
 			const done = new Promise<number>((resolve) => waiters.push(resolve));
 			pump();
 			return done;
