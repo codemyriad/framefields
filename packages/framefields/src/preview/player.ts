@@ -34,6 +34,7 @@ import {
 	SlugFontCache,
 } from "@framefields/webgpu-renderers";
 import { Blitter } from "./blit.js";
+import { scaleToHeight } from "./scale.js";
 
 export interface BuiltinRenderer {
 	ops: readonly string[];
@@ -92,9 +93,16 @@ type Renderable = {
 	fps?: number;
 };
 
+/** Set by the page before the composition's bundle starts the player. */
+export interface PlayerOptions {
+	/** Height to draw at, for a lighter preview; the composition's own when unset. */
+	height?: number;
+}
+
 declare global {
 	interface Window {
 		framefieldsPlayer?: Promise<PreviewPlayer>;
+		framefieldsPlayerOptions?: PlayerOptions;
 	}
 }
 
@@ -158,6 +166,8 @@ async function createPlayer(
 			? await (exported as () => unknown)()
 			: exported
 	) as Renderable;
+	const drawHeight = window.framefieldsPlayerOptions?.height;
+	if (drawHeight) scaleToHeight(target, drawHeight);
 	const vm = target.toVirtualMediaAsync
 		? await target.toVirtualMediaAsync()
 		: target.toVirtualMedia?.();

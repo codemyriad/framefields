@@ -2641,6 +2641,7 @@ export const Light = {
 export {
 	type PreviewCloseReason,
 	type PreviewOptions,
+	type PreviewPlaybackOptions,
 	type PreviewSession,
 	type PreviewSource,
 	startPreview,
