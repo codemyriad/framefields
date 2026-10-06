@@ -106,7 +106,6 @@ export async function buildEngine(outDir: string): Promise<void> {
 		...BROWSER,
 		entryPoints,
 		outdir: outDir,
-		outExtension: { ".js": ".mjs" },
 		splitting: true,
 		minify: true,
 		conditions: ["development", "browser", "import"],
@@ -124,6 +123,13 @@ export async function buildEngine(outDir: string): Promise<void> {
 			},
 		],
 	});
+	// Plain `.js`: every static host serves it as JavaScript, while some send
+	// `.mjs` as text, which browsers refuse to run as a module. This marks the
+	// files as ES modules for Node.
+	await fs.promises.writeFile(
+		path.join(outDir, "package.json"),
+		'{ "type": "module" }\n',
+	);
 }
 
 export interface ProjectBundle {
@@ -145,7 +151,7 @@ export async function bundleProject(options: {
 	const { build } = await import("esbuild");
 	const entry = path.resolve(options.entry);
 	const fromEngine = (file: string) => ({
-		path: `${ENGINE_URL}/${file}.mjs`,
+		path: `${ENGINE_URL}/${file}.js`,
 		external: true,
 	});
 	const settings = { modelsDir: options.modelsDir, ortBase: options.ortBase };
@@ -166,7 +172,7 @@ export async function bundleProject(options: {
 					}));
 					b.onLoad({ filter: /.*/, namespace: "framefields-preview" }, () => ({
 						contents: [
-							`import { startPlayer } from ${JSON.stringify(`${ENGINE_URL}/player.mjs`)};`,
+							`import { startPlayer } from ${JSON.stringify(`${ENGINE_URL}/player.js`)};`,
 							`import * as mod from ${JSON.stringify(entry)};`,
 							`startPlayer(mod, ${JSON.stringify(options.exportName)}, ${JSON.stringify(settings)});`,
 						].join("\n"),
@@ -203,7 +209,7 @@ let engineBuild: Promise<string> | undefined;
 export function prebuiltEngineDir(here: string): string | undefined {
 	return [here, path.join(here, "..")]
 		.map((base) => path.join(base, "preview-engine"))
-		.find((dir) => fs.existsSync(path.join(dir, "player.mjs")));
+		.find((dir) => fs.existsSync(path.join(dir, "player.js")));
 }
 
 /**
