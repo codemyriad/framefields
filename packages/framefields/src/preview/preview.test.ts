@@ -299,6 +299,31 @@ describe("startPreview", () => {
 		}
 	});
 
+	it("opens the page with a given function, unless a tab comes back", async () => {
+		const opened: string[] = [];
+		const open = (url: string) => {
+			opened.push(url);
+		};
+		const first = await start({ entry }, { open, port: 0 });
+		expect(opened).toEqual([first.url]);
+
+		// The next preview takes over the port, and the open tab reconnects.
+		const port = Number(new URL(first.url).port);
+		const second = start({ entry }, { open, port });
+		await first.closed;
+		for (;;) {
+			const ok = await new Promise<boolean>((resolve) => {
+				http
+					.get(`${first.url}events`, { agent: false }, () => resolve(true))
+					.on("error", () => resolve(false));
+			});
+			if (ok) break;
+			await new Promise((r) => setTimeout(r, 50));
+		}
+		await second;
+		expect(opened).toEqual([first.url]);
+	}, 10_000);
+
 	it("a new preview of the project takes over the port", async () => {
 		const first = await start({ entry }, { open: false, port: 0 });
 		const port = Number(new URL(first.url).port);
