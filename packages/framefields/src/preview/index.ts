@@ -12,6 +12,7 @@ import {
 	bundleProject,
 	ENGINE_URL,
 	engineDir,
+	ORT_WEB_CDN,
 	onnxRuntimeWeb,
 	visionModelsDir,
 } from "./bundle.js";
@@ -177,10 +178,7 @@ export async function startPreview(
 	source: PreviewSource,
 	options: PreviewOptions = {},
 ): Promise<PreviewSession> {
-	const entry =
-		source.entry instanceof URL || String(source.entry).startsWith("file:")
-			? fileURLToPath(source.entry)
-			: path.resolve(String(source.entry));
+	const entry = entryPath(source.entry);
 	const exportName = source.export ?? "default";
 	// Vision nodes load their cached models, and onnxruntime-web's files when
 	// the project has it installed.
@@ -282,27 +280,10 @@ export async function startPreview(
 			setAudio({ state: "none" });
 			return;
 		}
-		const renderer = options.renderer ?? new HeadlessMediaRenderer();
-		(async () => {
-			const vm = target.toVirtualMediaAsync
-				? await target.toVirtualMediaAsync()
-				: (target.toVirtualMedia as () => VirtualMediaData)();
-			return renderer.renderAudio(vm, { fps: meta.fps });
-		})().then(
-			({ channels, sampleRate }) => {
-				const left = channels[0] ?? new Float32Array(0);
-				const right = channels[1] ?? left;
-				const peaks = computePeaks(left, right, PEAK_BINS);
-				if (left.length === 0 || Math.max(...peaks) < 0.001) {
-					setAudio({ state: "none" });
-					return;
-				}
-				audioWav = encodeStereoWav([left, right], { sampleRate });
-				setAudio({
-					state: "ready",
-					durationSec: left.length / sampleRate,
-					peaks: peaks.map((p) => Math.round(p * 1000) / 1000),
-				});
+		mixSoundtrack(target, meta.fps, options.renderer).then(
+			(mixed) => {
+				audioWav = mixed.wav;
+				setAudio(mixed.status);
 			},
 			(err: unknown) => {
 				setAudio({
@@ -599,6 +580,288 @@ export async function startPreview(
 	}
 
 	return { url, closed, close: () => close() };
+}
+
+/** A composition to export, with its page's title. */
+export interface ExportPreviewSource extends PreviewSource {
+	/** Title shown in the page header. Defaults to `title` in the options, else the name. */
+	title?: string;
+	/** This composition's soundtrack, in place of `audio` in the options. */
+	audio?: PreviewAudio;
+}
+
+/**
+ * The soundtrack of an exported preview. `true` mixes it with the export
+ * engine, as `startPreview` does, into a WAV file; `false` leaves it out.
+ * `{ file, peaks }` publishes an audio file you already have instead (any
+ * format browsers decode: WAV, MP3, M4A, Ogg), with `peaks` for the
+ * waveform: levels from 0 to 1, spread evenly over the composition's length.
+ */
+export type PreviewAudio = boolean | { file: string; peaks?: number[] };
+
+export interface ExportPreviewOptions extends PreviewPlaybackOptions {
+	/**
+	 * Folder to write the preview into. Files the export writes are replaced;
+	 * anything else there is left alone.
+	 */
+	outDir: string;
+	/**
+	 * URL path the folder is served under, e.g. `"/films/preview/"`. Every URL
+	 * in the export starts with it, so it must match. Defaults to `"/"`.
+	 */
+	basePath?: string;
+	/** Title shown in the page header. */
+	title?: string;
+	/**
+	 * The project folder. It is published at `basePath`: a file the
+	 * composition reads at `<root>/assets/logo.svg` is served at
+	 * `<basePath>assets/logo.svg`, and the paths the code builds from
+	 * `import.meta.url` point there. Defaults to the project that holds the
+	 * entry, as for `startPreview`.
+	 */
+	root?: string;
+	/**
+	 * Files and folders to publish, relative to `root`: whatever the
+	 * composition loads (images, video, fonts, data it reads with `fs`).
+	 * Defaults to `assets`, when there is one. Fonts named by family only
+	 * (`assets/fonts/<Family>.ttf` in the working directory) are added.
+	 */
+	files?: string | string[];
+	/** The soundtrack; see `PreviewAudio`. Defaults to `true`, mixed. */
+	audio?: PreviewAudio;
+	/** Optional shared renderer instance, used to mix the soundtrack. */
+	renderer?: HeadlessMediaRenderer;
+}
+
+export interface PreviewExport {
+	/** The folder written. */
+	outDir: string;
+	/** URL path of each page by name; `""` for a single composition. */
+	pages: Record<string, string>;
+	/** URL paths of the project's files published with it. */
+	files: string[];
+}
+
+/** Where an export puts the browser engine, inside `basePath`. */
+const STATIC_ENGINE = "framefields-engine";
+
+/**
+ * Writes the preview as a static site: the page, the composition's code
+ * bundled against the browser engine, the engine itself, the project files
+ * the composition loads, and the soundtrack. Any static host can serve the
+ * folder under `basePath`; no preview server runs, so notes and reloading
+ * into the next version are off. Vision models are not published.
+ *
+ * Pass one composition, or several by name: each gets a page at
+ * `<basePath><name>/`, and they share one engine and one copy of the files.
+ */
+export async function exportPreview(
+	source: ExportPreviewSource | Record<string, ExportPreviewSource>,
+	options: ExportPreviewOptions,
+): Promise<PreviewExport> {
+	const sources: Record<string, ExportPreviewSource> = isPreviewSource(source)
+		? { "": source }
+		: source;
+	const names = Object.keys(sources);
+	if (names.length === 0) {
+		throw new Error(
+			"[framefields] exportPreview has no composition to export.",
+		);
+	}
+	for (const name of names) {
+		if (name && (!/^[\w-][\w.-]*$/.test(name) || name === STATIC_ENGINE)) {
+			throw new Error(
+				`[framefields] "${name}" can't name a preview page: use letters, digits, "-", "_" and ".".`,
+			);
+		}
+	}
+	const trimmed = (options.basePath ?? "/").replace(/^\/+|\/+$/g, "");
+	const base = trimmed ? `/${trimmed}/` : "/";
+	const outDir = path.resolve(options.outDir);
+	const entries = names.map((name) => entryPath(sources[name].entry));
+	const root = path.resolve(options.root ?? repoRoot(path.dirname(entries[0])));
+	const urlOf = (dir: string, file: string, prefix = base) =>
+		prefix + path.relative(dir, file).split(path.sep).join("/");
+
+	// The project's files, by the URL path they are served at.
+	const published = new Map<string, string>();
+	const include =
+		options.files === undefined
+			? [path.join(root, "assets")].filter((dir) => fs.existsSync(dir))
+			: (Array.isArray(options.files) ? options.files : [options.files]).map(
+					(f) => path.resolve(root, f),
+				);
+	for (const item of include) {
+		if (item !== root && !isInside(root, item)) {
+			throw new Error(
+				`[framefields] ${item} is outside the project folder ${root}. Pass root to publish it.`,
+			);
+		}
+		if (!fs.existsSync(item)) {
+			throw new Error(`[framefields] ${item} does not exist.`);
+		}
+		for (const file of await listFiles(item, outDir)) {
+			published.set(urlOf(root, file), file);
+		}
+	}
+	// Fonts named by family load from assets/fonts beside the page (see the
+	// <base> element), as the preview server serves them from the working
+	// directory.
+	const fonts = path.join(process.cwd(), "assets", "fonts");
+	for (const file of await listFiles(fonts, outDir)) {
+		const url = urlOf(fonts, file, `${base}assets/fonts/`);
+		if (!published.has(url)) published.set(url, file);
+	}
+	for (const url of published.keys()) {
+		const top = url.slice(base.length).split("/")[0];
+		if (top === STATIC_ENGINE || (names.includes(top) && top)) {
+			throw new Error(
+				`[framefields] the project file at ${url} would overlap the export's own ${top}/ folder.`,
+			);
+		}
+	}
+
+	await fs.promises.mkdir(outDir, { recursive: true });
+	const engineOut = path.join(outDir, STATIC_ENGINE);
+	await fs.promises.rm(engineOut, { recursive: true, force: true });
+	await fs.promises.cp(await engineDir(), engineOut, { recursive: true });
+	const files: Record<string, number> = {};
+	for (const [url, file] of published) {
+		const to = path.join(outDir, ...url.slice(base.length).split("/"));
+		await fs.promises.mkdir(path.dirname(to), { recursive: true });
+		await fs.promises.copyFile(file, to);
+		files[url] = (await fs.promises.stat(file)).size;
+	}
+
+	const pages: Record<string, string> = {};
+	for (const [i, name] of names.entries()) {
+		const src = sources[name];
+		const entry = entries[i];
+		const exportName = src.export ?? "default";
+		const dir = name ? path.join(outDir, name) : outDir;
+		const pageUrl = name ? `${base}${name}/` : base;
+		const target = await loadTarget(entry, exportName);
+		const title = src.title ?? options.title ?? (name || "framefields preview");
+		const meta = await resolveMeta(target, title, randomUUID(), null);
+		await fs.promises.mkdir(dir, { recursive: true });
+
+		let audio: AudioStatus = { state: "none" };
+		let audioUrl = "";
+		const sound = src.audio ?? options.audio ?? true;
+		if (sound === true) {
+			const mixed = await mixSoundtrack(target, meta.fps, options.renderer);
+			if (mixed.wav) {
+				await fs.promises.writeFile(path.join(dir, "audio.wav"), mixed.wav);
+				audioUrl = `${pageUrl}audio.wav?v=${digest(mixed.wav)}`;
+			}
+			audio = mixed.status;
+		} else if (sound) {
+			const file = path.resolve(root, sound.file);
+			const data = await fs.promises.readFile(file);
+			const shared = [...published].find(([, f]) => f === file)?.[0];
+			if (shared) {
+				audioUrl = shared;
+			} else {
+				const copy = `audio${path.extname(file).toLowerCase()}`;
+				await fs.promises.writeFile(path.join(dir, copy), data);
+				audioUrl = `${pageUrl}${copy}?v=${digest(data)}`;
+			}
+			audio = {
+				state: "ready",
+				durationSec: meta.frameCount / meta.fps,
+				peaks: sound.peaks ?? [],
+			};
+		}
+
+		const bundle = await bundleProject({
+			entry,
+			exportName,
+			modelsDir: `${base}framefields-models`,
+			ortBase: ORT_WEB_CDN,
+			engineUrl: `${base}${STATIC_ENGINE}`,
+			fileRoot: { dir: root, url: base },
+		});
+		const metaJson = JSON.stringify({ ...meta, audio });
+		await fs.promises.writeFile(path.join(dir, "player.js"), bundle.code);
+		await fs.promises.writeFile(path.join(dir, "meta.json"), metaJson);
+		await fs.promises.writeFile(
+			path.join(dir, "index.html"),
+			previewPage({
+				meta: `${pageUrl}meta.json?v=${digest(metaJson)}`,
+				audio: audioUrl,
+				player: `${pageUrl}player.js?v=${digest(bundle.code)}`,
+				live: false,
+				base,
+				files,
+				height: options.height,
+				playback: options.playback,
+				showFps: options.showFps,
+			}),
+		);
+		pages[name] = pageUrl;
+	}
+	return { outDir, pages, files: Object.keys(files) };
+}
+
+function isPreviewSource(source: object): source is ExportPreviewSource {
+	const entry = (source as { entry?: unknown }).entry;
+	return typeof entry === "string" || entry instanceof URL;
+}
+
+function entryPath(entry: string | URL): string {
+	return entry instanceof URL || String(entry).startsWith("file:")
+		? fileURLToPath(entry)
+		: path.resolve(String(entry));
+}
+
+/** A file, or the files in a folder, leaving out hidden ones, node_modules and `skip`. */
+async function listFiles(item: string, skip: string): Promise<string[]> {
+	const stat = await fs.promises.stat(item).catch(() => undefined);
+	if (stat?.isFile()) return [item];
+	if (!stat?.isDirectory() || item === skip) return [];
+	const files: string[] = [];
+	for (const child of await fs.promises.readdir(item, {
+		withFileTypes: true,
+	})) {
+		if (child.name.startsWith(".") || child.name === "node_modules") continue;
+		files.push(...(await listFiles(path.join(item, child.name), skip)));
+	}
+	return files.sort();
+}
+
+function digest(data: string | Buffer): string {
+	return createHash("sha1").update(data).digest("hex").slice(0, 10);
+}
+
+/** The composition's soundtrack, mixed by the export engine, as a WAV file. */
+async function mixSoundtrack(
+	target: PreviewTarget,
+	fps: number,
+	renderer?: HeadlessMediaRenderer,
+): Promise<{ status: AudioStatus; wav?: Buffer }> {
+	if (!target.toVirtualMediaAsync && !target.toVirtualMedia) {
+		return { status: { state: "none" } };
+	}
+	const vm = target.toVirtualMediaAsync
+		? await target.toVirtualMediaAsync()
+		: (target.toVirtualMedia as () => VirtualMediaData)();
+	const { channels, sampleRate } = await (
+		renderer ?? new HeadlessMediaRenderer()
+	).renderAudio(vm, { fps });
+	const left = channels[0] ?? new Float32Array(0);
+	const right = channels[1] ?? left;
+	const peaks = computePeaks(left, right, PEAK_BINS);
+	if (left.length === 0 || Math.max(...peaks) < 0.001) {
+		return { status: { state: "none" } };
+	}
+	return {
+		wav: encodeStereoWav([left, right], { sampleRate }),
+		status: {
+			state: "ready",
+			durationSec: left.length / sampleRate,
+			peaks: peaks.map((p) => Math.round(p * 1000) / 1000),
+		},
+	};
 }
 
 async function loadTarget(

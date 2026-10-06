@@ -4,6 +4,16 @@
 // which serves files by their absolute path; synchronous reads use a
 // synchronous request, so build-time code like `JSON.parse(readFileSync(…))`
 // runs unchanged. Writes are skipped: the preview never changes the project.
+// A static export has no server to ask whether a file exists: its page lists
+// the published files instead.
+
+declare global {
+	interface Window {
+		/** A static export's files: their size by URL path. */
+		__framefieldsStaticFiles?: Record<string, number>;
+	}
+}
+
 type Enc =
 	| BufferEncoding
 	| { encoding?: BufferEncoding | null }
@@ -51,6 +61,11 @@ function stat(p: string | URL): { exists: boolean; size: number } {
 	const file = s.startsWith("file://")
 		? decodeURIComponent(new URL(s).pathname)
 		: s;
+	const files = globalThis.window?.__framefieldsStaticFiles;
+	if (files) {
+		const size = Object.hasOwn(files, file) ? files[file] : undefined;
+		return { exists: size !== undefined, size: size ?? 0 };
+	}
 	const xhr = new XMLHttpRequest();
 	xhr.open("GET", `/@framefields/stat?path=${encodeURIComponent(file)}`, false);
 	xhr.send();

@@ -420,6 +420,23 @@ export function previewPage(config: PreviewPageConfig): string {
   var showFps = fpsParam != null ? fpsParam !== "0" && fpsParam !== "false" : !!CONFIG.showFps;
   // Read by the player when the composition's bundle starts it.
   window.framefieldsPlayerOptions = { height: renderHeight || undefined };
+
+  // A static export has no server: the page lists the published files for
+  // fs.existsSync, and the engine's requests for local files under /@fs/
+  // (the preview server's prefix) go to where the files are published.
+  if (CONFIG.files) {
+    window.__framefieldsStaticFiles = CONFIG.files;
+    var fetchFile = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+      var request = input instanceof Request ? input : null;
+      var url = new URL(request ? request.url : String(input), location.href);
+      if (url.origin === location.origin && url.pathname.indexOf("/@fs/") === 0) {
+        url.pathname = url.pathname.slice(4);
+        input = request ? new Request(url.href, request) : url.href;
+      }
+      return fetchFile(input, init);
+    };
+  }
   var stage = $("stage"), timeline = $("timeline"), tlInner = $("tlInner");
 
   var meta = null, session = null, frame = 0, shown = -1, playing = false, playToken = 0;
