@@ -49,19 +49,19 @@ describe("startPreview", () => {
 	it("serves the browser engine the project bundle imports", async () => {
 		const session = await start({ entry }, { open: false, port: 0 });
 
-		const player = await fetch(`${session.url}@framefields/engine/player.mjs`);
+		const player = await fetch(`${session.url}@framefields/engine/player.js`);
 		expect(player.status).toBe(200);
 		expect(player.headers.get("content-type")).toContain("javascript");
 		expect(await player.text()).toContain("startPlayer");
 
 		const shim = await fetch(
-			`${session.url}@framefields/engine/shims/path.mjs`,
+			`${session.url}@framefields/engine/shims/path.js`,
 		);
 		expect(shim.status).toBe(200);
 		expect(await shim.text()).toContain("export");
 
 		expect(
-			(await fetch(`${session.url}@framefields/engine/missing.mjs`)).status,
+			(await fetch(`${session.url}@framefields/engine/missing.js`)).status,
 		).toBe(404);
 	}, 60_000);
 
@@ -324,7 +324,7 @@ describe("browser engine", () => {
 				"player",
 			]) {
 				// Importing runs the module's top-level code, as a browser would.
-				await import(pathToFileURL(path.join(dir, `${name}.mjs`)).href);
+				await import(pathToFileURL(path.join(dir, `${name}.js`)).href);
 			}
 		} finally {
 			await fs.promises.rm(dir, { recursive: true, force: true });
@@ -342,7 +342,7 @@ describe("prebuiltEngineDir", () => {
 			expect(prebuiltEngineDir(root)).toBeUndefined();
 
 			await fs.promises.mkdir(engine, { recursive: true });
-			await fs.promises.writeFile(path.join(engine, "player.mjs"), "export {}");
+			await fs.promises.writeFile(path.join(engine, "player.js"), "export {}");
 			expect(prebuiltEngineDir(root)).toBe(engine);
 
 			const nested = path.join(root, "preview");
