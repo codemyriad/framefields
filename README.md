@@ -265,7 +265,9 @@ Project normalized landmarks to screen space with a configurable camera FOV, the
 - **One stable URL per project** — the port is derived from the working directory, so re-running the preview replaces the running server and any open tab reloads into the new version by itself. Close the tab and the server shuts down about five seconds later. A reload comes back at the same moment, and `#t=12.5` links to one.
 - **Notes pinned on the picture** — pause, click a spot (or drag an area) and write what should change. Each note keeps its moment, its spot and a picture of the frame with the spot marked, in `.framefields/preview-notes/`, and prints where the preview runs, so an agent can apply exactly what you meant. Tick notes off as you check them.
 - **Tells you what happened** — the page's errors (a failed build, a frame that threw, a missing font) and why the server stopped are printed where the preview runs, so whoever started it, person or agent, sees them without opening devtools. Scripts can drive the page through `window.framefieldsPreview` (`seek`, `play`, `pause`, `state`).
-- **Shown where you are** — `startPreview` serves the page and returns its URL instead of opening a browser, so an agent can show it in its own pane (Claude Code, Codex); pass `open: true` to open the system browser.
+- **Shown where you are** — `startPreview` serves the page and returns its URL instead of opening a browser, so an agent can show it in its own pane (Claude Code, Codex); pass `open: true` to open the system browser, or a function to open it your own way.
+- **Light enough for a slow device** — `height: 360` draws a smaller picture (the page also has a resolution menu), `playback: "realtime"` draws the frame due now and skips late ones instead of buffering, so the sound never waits, and `showFps: true` shows the frame rate playback reaches. The address can set each one: `?height=360`, `?playback=realtime`, `?fps=1`.
+- **Publish it as a static site** — `exportPreview` writes the same player into a folder that any static host serves under a path, with no server: the page, the composition's code, the browser engine, the project files it loads and the soundtrack. Several compositions can share one export.
 
 ```typescript
 import { startPreview } from "framefields";
@@ -276,6 +278,16 @@ const session = await startPreview(
 );
 console.log(`Preview at ${session.url}`);
 await session.closed; // serves until its tab closes or a newer preview takes over
+```
+
+```typescript
+import { exportPreview } from "framefields";
+
+// Served at https://example.com/films/launch/
+await exportPreview(
+  { entry: new URL("./film.ts", import.meta.url), export: "buildFilm" },
+  { outDir: "site/films/launch", basePath: "/films/launch/", height: 360, playback: "realtime" },
+);
 ```
 
 <img src="assets/showcase/prw-ss.png" alt="framefields live preview player: WebGPU rendering, waveform timeline, frame stepping, and audio status at 127.0.0.1:41133" width="100%">
