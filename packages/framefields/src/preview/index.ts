@@ -541,8 +541,16 @@ export async function startPreview(
 		});
 		onClient = undefined;
 		if (!reconnected) {
-			if (typeof options.open === "function") options.open(url);
-			else openBrowser(url);
+			if (typeof options.open === "function") {
+				// The caller's opener must not take down a preview that is already serving.
+				try {
+					options.open(url);
+				} catch (err) {
+					say(
+						`could not open ${url}: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
+			} else openBrowser(url);
 		}
 	}
 
@@ -709,7 +717,14 @@ export async function exportPreview(
 		const pageUrl = name ? `${base}${name}/` : base;
 		const target = await loadTarget(entry, exportName);
 		const title = src.title ?? options.title ?? (name || "framefields preview");
-		const meta = await resolveMeta(target, title, randomUUID(), null);
+		// The session only lets a live tab notice a newer preview; a static page has
+		// none, so a fixed value keeps repeated exports of the same sources identical.
+		const meta = await resolveMeta(
+			target,
+			title,
+			`static-${name || "page"}`,
+			null,
+		);
 		await fs.promises.mkdir(dir, { recursive: true });
 
 		let audio: AudioStatus = { state: "none" };
@@ -727,7 +742,7 @@ export async function exportPreview(
 			const data = await fs.promises.readFile(file);
 			const shared = [...published].find(([, f]) => f === file)?.[0];
 			if (shared) {
-				audioUrl = shared;
+				audioUrl = `${shared}?v=${digest(data)}`;
 			} else {
 				const copy = `audio${path.extname(file).toLowerCase()}`;
 				await fs.promises.writeFile(path.join(dir, copy), data);
