@@ -1,4 +1,11 @@
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	drawChildToTexture,
+	drawFullscreenPass,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+} from "@framefields/node-sdk/gpu";
 import type { KenBurnsKeyframe } from "../shared/config.js";
 
 const easeIn = (t: number): number => t * t;
@@ -183,27 +190,7 @@ struct MotionBlurUniforms {
 @group(0) @binding(0) var<uniform> u : MotionBlurUniforms;
 @group(1) @binding(0) var tex        : texture_2d<f32>;
 @group(1) @binding(1) var samp       : sampler;
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
 	let uv = in.uv;
@@ -242,41 +229,22 @@ const motionBlurData = new Float32Array(12);
 function getMotionBlurResources(device: GPUDevice, format: GPUTextureFormat) {
 	let res = deviceResourceCache.get(device);
 	if (!res) {
-		const motionBlurUniformLayout = device.createBindGroupLayout({
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.FRAGMENT,
-					buffer: { type: "uniform" },
-				},
-			],
-		});
-		const singleTextureLayout = device.createBindGroupLayout({
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.FRAGMENT,
-					texture: { sampleType: "float" },
-				},
-				{
-					binding: 1,
-					visibility: GPUShaderStage.FRAGMENT,
-					sampler: { type: "filtering" },
-				},
-			],
-		});
+		const motionBlurUniformLayout = fragmentBindGroupLayout(device, [
+			"uniform",
+		]);
+		const singleTextureLayout = fragmentBindGroupLayout(device, [
+			"texture",
+			"sampler",
+		]);
 		const module = device.createShaderModule({
 			label: "kenburns_motionblur.wgsl",
 			code: motionBlurWgsl,
 		});
-		const motionBlurPipeline = device.createRenderPipeline({
+		const motionBlurPipeline = createFullscreenPipeline(device, {
 			label: "MotionBlurPipeline",
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [motionBlurUniformLayout, singleTextureLayout],
-			}),
-			vertex: { module, entryPoint: "vs" },
-			fragment: { module, entryPoint: "fs", targets: [{ format }] },
-			primitive: { topology: "triangle-strip" },
+			module,
+			layouts: [motionBlurUniformLayout, singleTextureLayout],
+			format,
 		});
 		res = { motionBlurPipeline, motionBlurUniformLayout, singleTextureLayout };
 		deviceResourceCache.set(device, res);
@@ -294,7 +262,6 @@ export const KenBurnsWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		targetWidth,
 		targetHeight,
 		props,
-		drawChild,
 	} = args;
 
 	const {
@@ -367,49 +334,18 @@ export const KenBurnsWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	// cropped region ourselves using drawTextureRegion — which does not depend
 	// on the transform stack at all.
 	//
-	const tempTex = ctx.renderer.getTemporaryTexture(sourceWidth, sourceHeight, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const tempView = tempTex.createView();
-
 	// End the current pass before starting child rendering.
 	pass.end();
 
-	// Clear the temporary texture to avoid garbage from previous frames
-	const clearPass = ctx.renderer.beginFrame(
-		encoder,
-		tempView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		sourceWidth,
-		sourceHeight,
-		"clear",
-	);
-	clearPass.end();
-
-	ctx.renderer.pushScissor({
-		x: 0,
-		y: 0,
+	const { texture: tempTex } = await drawChildToTexture(args, childMedia, {
 		width: sourceWidth,
 		height: sourceHeight,
-	});
-	ctx.renderer.pushIdentity();
-
-	await drawChild(
-		childMedia,
-		{
+		props: {
 			...props,
 			containerWidth: sourceWidth,
 			containerHeight: sourceHeight,
 		},
-		tempView,
-		tempTex,
-		sourceWidth,
-		sourceHeight,
-	);
-
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	});
 
 	const motionBlurSize = op.motionBlurSize ?? 1.5;
 	let blurTex: GPUTexture | null = null;
@@ -444,36 +380,18 @@ export const KenBurnsWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		const blurView = blurTex.createView();
 
 		// 2. Render blurred result into blurTex
-		const blurPass = encoder.beginRenderPass({
-			colorAttachments: [
-				{
-					view: blurView,
-					loadOp: "clear",
-					storeOp: "store",
-					clearValue: { r: 0, g: 0, b: 0, a: 0 },
-				},
-			],
-		});
-
-		blurPass.setPipeline(pipeline!);
-		blurPass.setBindGroup(
-			0,
+		drawFullscreenPass(encoder, blurView, pipeline!, [
 			ctx.device.createBindGroup({
 				layout: uLayout!,
 				entries: [{ binding: 0, resource: { buffer: uBuffer } }],
 			}),
-		);
-		blurPass.setBindGroup(
-			1,
 			ctx.renderer.bindGroupCache.getBindGroup(
 				ctx.device,
 				tLayout!,
 				tempTex,
 				sampler,
 			),
-		);
-		blurPass.draw(4);
-		blurPass.end();
+		]);
 	}
 
 	// ── 6. Composite the cropped source onto the output ──────────────────────

@@ -22,7 +22,6 @@ import type {
 import { ColorSchema } from "@framefields/node-sdk";
 export type { TextSpan, TextSpanMark };
 
-import { z } from "zod";
 import {
 	type AdvancedTextAnimator,
 	AdvancedTextAnimatorSchema,
@@ -34,9 +33,10 @@ import {
 	TextPathOptionsSchema,
 	type TypewriterAnimator,
 	TypewriterAnimatorSchema,
-} from "./text-animations/index.js";
+} from "@framefields/webgpu-renderers/text-animations";
+import { z } from "zod";
 
-export * from "./text-animations/index.js";
+export * from "@framefields/webgpu-renderers/text-animations";
 
 // ── shared leaf primitives ────────────────────────────────────────────
 

@@ -1,5 +1,13 @@
 /// <reference types="webgpu" />
-import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+
+import {
+	resolveFrameNumber,
+	type WebGPUNodeRenderer,
+} from "@framefields/node-sdk";
+import {
+	drawChildToTexture,
+	drawTextureToTarget,
+} from "@framefields/node-sdk/gpu";
 import { TemporalDeflickerPipeline } from "@framefields/tensor-webgpu";
 
 interface TemporalDeflickerOp {
@@ -24,52 +32,6 @@ interface TemporalDeflickerOp {
 			} | null;
 		}
 	>;
-}
-
-function resolveVal(
-	val: unknown,
-	fallback: number,
-	frame: number,
-	fps: number,
-): number {
-	if (val === undefined || val === null) return fallback;
-	if (typeof val === "number") return Number.isFinite(val) ? val : fallback;
-	if (typeof val === "object" && val !== null) {
-		if (
-			"get" in (val as Record<string, unknown>) &&
-			typeof (val as { get: unknown }).get === "function"
-		) {
-			try {
-				const res = (val as { get: (ctx?: unknown) => unknown }).get({
-					frame,
-					fps,
-					time: fps > 0 ? frame / fps : 0,
-					duration: 0,
-					durationMs: 0,
-					progress: 0,
-					deltaTime: fps > 0 ? 1 / fps : 0,
-				});
-				const n = Number(res);
-				if (Number.isFinite(n)) return n;
-			} catch {
-				// fallback
-			}
-		}
-		if ("value" in (val as Record<string, unknown>)) {
-			const n = Number((val as { value: unknown }).value);
-			if (Number.isFinite(n)) return n;
-		}
-	}
-	if (typeof val === "function") {
-		try {
-			const n = Number(val({ frame, fps, time: fps > 0 ? frame / fps : 0 }));
-			if (Number.isFinite(n)) return n;
-		} catch {
-			// fallback
-		}
-	}
-	const n = Number(val);
-	return Number.isFinite(n) ? n : fallback;
 }
 
 function resolveProp(
@@ -101,7 +63,7 @@ function resolveProp(
 		raw = op[fieldName];
 	}
 
-	const resolved = resolveVal(raw, defaultValue, frame, fps);
+	const resolved = resolveFrameNumber(raw, defaultValue, frame, fps);
 	return Math.max(minVal, Math.min(maxVal, resolved));
 }
 
@@ -122,17 +84,7 @@ function getOrCreatePipeline(
 export const TemporalDeflickerWebGPURenderer: WebGPUNodeRenderer = async (
 	args,
 ) => {
-	const {
-		ctx,
-		encoder,
-		pass,
-		targetView,
-		targetTexture,
-		targetWidth,
-		targetHeight,
-		props,
-		drawChild,
-	} = args;
+	const { ctx, encoder, pass, targetWidth, targetHeight, props } = args;
 
 	const op = props.virtualMedia?.operation as TemporalDeflickerOp | undefined;
 	if (!op || (op.op !== "TemporalDeflicker" && op.op !== "Deflicker")) {
@@ -154,39 +106,14 @@ export const TemporalDeflickerWebGPURenderer: WebGPUNodeRenderer = async (
 	const fps = props.fps || 30;
 
 	// 1. Draw child source media into a clean temporary texture
-	const srcTex = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const srcView = srcTex.createView();
-
-	const srcClearPass = ctx.renderer.beginFrame(
-		encoder,
-		srcView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	srcClearPass.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		sourceMedia,
-		{
+	const { texture: srcTex } = await drawChildToTexture(args, sourceMedia, {
+		props: {
 			...props,
 			virtualMedia: sourceMedia,
 			containerWidth: width,
 			containerHeight: height,
 		},
-		srcView,
-		srcTex,
-		width,
-		height,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	});
 
 	// End active pass from child drawing
 	args.pass.end();
@@ -247,22 +174,6 @@ export const TemporalDeflickerWebGPURenderer: WebGPUNodeRenderer = async (
 	);
 
 	// 4. Render stabilized output to targetView
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"load",
-	);
-
 	const opacity = typeof op.opacity === "number" ? op.opacity : 1.0;
-	ctx.renderer.drawTexture(
-		finalPass,
-		deflickeredTex,
-		{ x: 0, y: 0, width, height },
-		{ opacity },
-	);
-
-	args.pass = finalPass;
+	drawTextureToTarget(args, deflickeredTex, opacity);
 };

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { type Vec3, Vector3Math } from "../math3d/index.js";
 import type { LoadModelOptions, Material3D, Mesh3DData, Model3DData } from "./types.js";
+import { computeBounds, createIndexArray, resolveModelTransform, transformModelBounds, transformPositions } from "./mesh-utils.js";
 
 export class StlLoader {
 	/**
@@ -192,80 +193,21 @@ export class StlLoader {
 		rawIndices: number[],
 		options: LoadModelOptions = {},
 	): Model3DData {
-		let minX = Infinity;
-		let minY = Infinity;
-		let minZ = Infinity;
-		let maxX = -Infinity;
-		let maxY = -Infinity;
-		let maxZ = -Infinity;
+		const bounds = computeBounds(rawPositions);
+		const transform = resolveModelTransform(bounds, options);
+		const positions = transformPositions(rawPositions, transform);
 
-		for (let i = 0; i < rawPositions.length; i += 3) {
-			const x = rawPositions[i]!;
-			const y = rawPositions[i + 1]!;
-			const z = rawPositions[i + 2]!;
-			if (x < minX) minX = x;
-			if (x > maxX) maxX = x;
-			if (y < minY) minY = y;
-			if (y > maxY) maxY = y;
-			if (z < minZ) minZ = z;
-			if (z > maxZ) maxZ = z;
-		}
-
-		if (!Number.isFinite(minX)) {
-			minX = minY = minZ = 0;
-			maxX = maxY = maxZ = 0;
-		}
-
-		const centerX = (minX + maxX) * 0.5;
-		const centerY = (minY + maxY) * 0.5;
-		const centerZ = (minZ + maxZ) * 0.5;
-
-		const sizeX = maxX - minX;
-		const sizeY = maxY - minY;
-		const sizeZ = maxZ - minZ;
-		const maxDimension = Math.max(sizeX, sizeY, sizeZ, 0.0001);
-
-		let scaleMultiplier = 1.0;
-		if (options.normalizeSize && options.normalizeSize > 0) {
-			scaleMultiplier = options.normalizeSize / maxDimension;
-		}
-
-		let scaleX = scaleMultiplier;
-		let scaleY = scaleMultiplier;
-		let scaleZ = scaleMultiplier;
-		if (typeof options.scale === "number") {
-			scaleX *= options.scale;
-			scaleY *= options.scale;
-			scaleZ *= options.scale;
-		} else if (Array.isArray(options.scale)) {
-			scaleX *= options.scale[0];
-			scaleY *= options.scale[1];
-			scaleZ *= options.scale[2];
-		}
-
-		const offsetX = options.center ? centerX : 0;
-		const offsetY = options.center ? centerY : 0;
-		const offsetZ = options.center ? centerZ : 0;
-
-		const positions = new Float32Array(rawPositions.length);
+		// Planar UV fallback based on bounding size
+		const [minX, minY] = bounds.min;
+		const [sizeX, sizeY] = bounds.size;
 		const uvs = new Float32Array((rawPositions.length / 3) * 2);
-
 		for (let i = 0; i < rawPositions.length; i += 3) {
-			const px = (rawPositions[i]! - offsetX) * scaleX;
-			const py = (rawPositions[i + 1]! - offsetY) * scaleY;
-			const pz = (rawPositions[i + 2]! - offsetZ) * scaleZ;
-			positions[i] = px;
-			positions[i + 1] = py;
-			positions[i + 2] = pz;
-
-			// Planar UV fallback based on bounding size
 			const uvIdx = (i / 3) * 2;
 			uvs[uvIdx] = sizeX > 0 ? (rawPositions[i]! - minX) / sizeX : 0;
 			uvs[uvIdx + 1] = sizeY > 0 ? (rawPositions[i + 1]! - minY) / sizeY : 0;
 		}
 
-		const isLarge = positions.length / 3 > 65535;
-		const indexArray = isLarge ? new Uint32Array(rawIndices) : new Uint16Array(rawIndices);
+		const indexArray = createIndexArray(rawIndices, positions.length / 3);
 
 		const defaultMaterial: Material3D = {
 			name: "stl_default",
@@ -287,25 +229,13 @@ export class StlLoader {
 			},
 		];
 
-		const finalMinX = (minX - offsetX) * scaleX;
-		const finalMinY = (minY - offsetY) * scaleY;
-		const finalMinZ = (minZ - offsetZ) * scaleZ;
-		const finalMaxX = (maxX - offsetX) * scaleX;
-		const finalMaxY = (maxY - offsetY) * scaleY;
-		const finalMaxZ = (maxZ - offsetZ) * scaleZ;
 
 		return {
 			name: "STL_Model",
 			meshes,
 			materials: { stl_default: defaultMaterial },
 			animations: [],
-			bounds: {
-				min: [finalMinX, finalMinY, finalMinZ],
-				max: [finalMaxX, finalMaxY, finalMaxZ],
-				center: [(finalMinX + finalMaxX) * 0.5, (finalMinY + finalMaxY) * 0.5, (finalMinZ + finalMaxZ) * 0.5],
-				size: [finalMaxX - finalMinX, finalMaxY - finalMinY, finalMaxZ - finalMinZ],
-				boundingSphereRadius: Math.hypot(finalMaxX - finalMinX, finalMaxY - finalMinY, finalMaxZ - finalMinZ) * 0.5,
-			},
+			bounds: transformModelBounds(bounds, transform),
 		};
 	}
 

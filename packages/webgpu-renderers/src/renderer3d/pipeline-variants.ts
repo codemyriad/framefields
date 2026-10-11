@@ -4,19 +4,9 @@
  * bloom variants are built on first use from the same descriptor parts.
  */
 
-/** Premultiplied-alpha "over". */
-export const PREMULTIPLIED_OVER: GPUBlendState = {
-	color: {
-		srcFactor: "one",
-		dstFactor: "one-minus-src-alpha",
-		operation: "add",
-	},
-	alpha: {
-		srcFactor: "one",
-		dstFactor: "one-minus-src-alpha",
-		operation: "add",
-	},
-};
+import { PREMULTIPLIED_OVER } from "../renderer2d/pipeline-utils.js";
+
+export { PREMULTIPLIED_OVER };
 
 /** Linear-depth MRT target (DoF) and HDR radiance target (bloom). */
 export const LINEAR_DEPTH_FORMAT: GPUTextureFormat = "rgba16float";
@@ -31,6 +21,31 @@ export interface PipelineVariantBase {
 	depthStencil: GPUDepthStencilState;
 	primitive: GPUPrimitiveState;
 	multisample: GPUMultisampleState;
+}
+
+/** The color pipeline and the color + linear depth (DoF) pipeline of `base`. */
+export function createBasePipelines(
+	device: GPUDevice,
+	b: PipelineVariantBase,
+): { single: GPURenderPipeline; mrt: GPURenderPipeline } {
+	const create = (useMrt: boolean) =>
+		device.createRenderPipeline({
+			label: `${b.label}${useMrt ? "Mrt" : "Single"}`,
+			layout: b.layout,
+			vertex: b.vertex,
+			fragment: {
+				module: b.module,
+				entryPoint: useMrt ? "fs_mrt" : "fs_single",
+				targets: [
+					{ format: b.format, blend: PREMULTIPLIED_OVER },
+					...(useMrt ? [{ format: LINEAR_DEPTH_FORMAT }] : []),
+				],
+			},
+			depthStencil: b.depthStencil,
+			primitive: b.primitive,
+			multisample: b.multisample,
+		});
+	return { single: create(false), mrt: create(true) };
 }
 
 export class BloomPipelineVariants {
@@ -67,4 +82,26 @@ export class BloomPipelineVariants {
 		}
 		return pipe;
 	}
+}
+
+/**
+ * Writes the shared head of a model uniform block: model matrix [0..15],
+ * normal matrix [16..31] (the model matrix when absent), color tint [32..35].
+ */
+export function writeModelTransform(
+	out: Float32Array,
+	modelMatrix: ArrayLike<number>,
+	normalMatrix: ArrayLike<number> | undefined,
+	colorTint?: ArrayLike<number> | null,
+): void {
+	const norm = normalMatrix ?? modelMatrix;
+	const tint = colorTint ?? [1, 1, 1, 1];
+	for (let i = 0; i < 16; i++) {
+		out[i] = modelMatrix[i] ?? 0;
+		out[16 + i] = norm[i] ?? 0;
+	}
+	out[32] = tint[0];
+	out[33] = tint[1];
+	out[34] = tint[2];
+	out[35] = tint[3];
 }

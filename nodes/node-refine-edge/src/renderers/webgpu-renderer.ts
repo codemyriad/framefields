@@ -1,7 +1,20 @@
 /// <reference types="webgpu" />
 import type { VirtualMediaData } from "@framefields/core";
-import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
-import { signalRegistry } from "@framefields/webgpu-renderers";
+import {
+	resolveHandleParam,
+	type WebGPUNodeRenderer,
+} from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	drawChildToTexture,
+	drawFullscreenPass,
+	drawTextureToTarget,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+	signalTextureView,
+	signalTiming,
+	texturesLayout,
+} from "@framefields/node-sdk/gpu";
 import {
 	MAX_DECONTAMINATE,
 	MAX_FEATHER,
@@ -74,27 +87,7 @@ struct RefineEdgeUniforms {
 @group(2) @binding(3) var featherSigTex       : texture_2d<f32>;
 @group(2) @binding(4) var shiftEdgeSigTex     : texture_2d<f32>;
 @group(2) @binding(5) var signalSamp          : sampler;
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 fn extractChannel(color : vec4<f32>, chCode : f32) -> f32 {
 	if (chCode < 0.5) {
@@ -342,75 +335,11 @@ function getRefineEdgeResources(
 	const cached = deviceResourceCache.get(device);
 	if (cached) return cached;
 
-	const uniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
+	const uniformLayout = fragmentBindGroupLayout(device, ["uniform"]);
 
-	const textureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 2,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 3,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
+	const textureLayout = texturesLayout(device, 3);
 
-	const signalTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 2,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 3,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 4,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 5,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
+	const signalTextureLayout = texturesLayout(device, 5);
 
 	const shaderModule = device.createShaderModule({
 		code: WGSL_REFINE_EDGE,
@@ -420,20 +349,10 @@ function getRefineEdgeResources(
 		bindGroupLayouts: [uniformLayout, textureLayout, signalTextureLayout],
 	});
 
-	const pipeline = device.createRenderPipeline({
-		layout: pipelineLayout,
-		vertex: {
-			module: shaderModule,
-			entryPoint: "vs",
-		},
-		fragment: {
-			module: shaderModule,
-			entryPoint: "fs",
-			targets: [{ format: targetFormat }],
-		},
-		primitive: {
-			topology: "triangle-strip",
-		},
+	const pipeline = createFullscreenPipeline(device, {
+		module: shaderModule,
+		layouts: pipelineLayout,
+		format: targetFormat,
 	});
 
 	const res: DeviceRefineEdgeResources = {
@@ -451,12 +370,10 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		ctx,
 		encoder,
 		pass,
-		targetView,
 		targetTexture,
 		targetWidth,
 		targetHeight,
 		props,
-		drawChild,
 	} = args;
 
 	const op = props.virtualMedia?.operation as RefineEdgeOp | undefined;
@@ -478,42 +395,14 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		fallbackVal: number,
 		clampMin = 0,
 		clampMax = 1000,
-	): {
-		val: number;
-		hasStaticSig: boolean;
-		sd: RefineEdgeSignalData | null;
-		handleId?: string | null;
-	} => {
-		if (handleId && op.inputs?.[handleId]?.connectionValid) {
-			const outputItem = op.inputs[handleId].outputItem;
-			if (outputItem?.type === "Number") {
-				const numVal =
-					typeof outputItem.data === "number"
-						? outputItem.data
-						: ((outputItem.data as { value?: number })?.value ?? fallbackVal);
-				return {
-					val: Math.max(clampMin, Math.min(clampMax, numVal)),
-					hasStaticSig: false,
-					sd: null,
-					handleId,
-				};
-			}
-			if (outputItem?.type === "Signal" && outputItem.data) {
-				return {
-					val: fallbackVal,
-					hasStaticSig: true,
-					sd: outputItem.data as RefineEdgeSignalData,
-					handleId,
-				};
-			}
-		}
-		return {
-			val: Math.max(clampMin, Math.min(clampMax, fallbackVal)),
-			hasStaticSig: false,
-			sd: null,
+	) =>
+		resolveHandleParam<RefineEdgeSignalData>(
+			op.inputs,
 			handleId,
-		};
-	};
+			fallbackVal,
+			clampMin,
+			clampMax,
+		);
 
 	const decontamRes = resolveField(
 		op.decontaminateAmountHandleId,
@@ -547,81 +436,34 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	);
 
 	// 1. Render primary Input child media
-	const tmpInputTex = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const tmpInputView = tmpInputTex.createView();
-
-	const childInputPass = ctx.renderer.beginFrame(
-		encoder,
-		tmpInputView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	childInputPass.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
+	const { texture: tmpInputTex, view: tmpInputView } = await drawChildToTexture(
+		args,
 		childMedia,
 		{
-			...props,
-			virtualMedia: childMedia,
-			renderId: `${props.renderId}-input`,
-			excludeTextures: [...(props.excludeTextures || []), tmpInputTex],
+			props: {
+				...props,
+				virtualMedia: childMedia,
+				renderId: `${props.renderId}-input`,
+			},
 		},
-		tmpInputView,
-		tmpInputTex,
-		width,
-		height,
 	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
 
 	// 2. Render optional Matte child media if connected
 	let tmpMatteTex: GPUTexture | null = null;
 	if (op.matteMedia) {
-		tmpMatteTex = ctx.renderer.getTemporaryTexture(width, height, [
-			...(props.excludeTextures || []),
-			targetTexture,
-			tmpInputTex,
-		]);
-		const tmpMatteView = tmpMatteTex.createView();
-
-		const childMattePass = ctx.renderer.beginFrame(
-			encoder,
-			tmpMatteView,
-			{ r: 0, g: 0, b: 0, a: 0 },
-			width,
-			height,
-			"clear",
-		);
-		childMattePass.end();
-
-		ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-		ctx.renderer.pushIdentity();
-		await drawChild(
+		({ texture: tmpMatteTex } = await drawChildToTexture(
+			args,
 			op.matteMedia as VirtualMediaData,
 			{
-				...props,
-				virtualMedia: op.matteMedia as VirtualMediaData,
-				renderId: `${props.renderId}-matte`,
-				excludeTextures: [
-					...(props.excludeTextures || []),
-					tmpInputTex,
-					tmpMatteTex,
-				],
+				props: {
+					...props,
+					virtualMedia: op.matteMedia as VirtualMediaData,
+					renderId: `${props.renderId}-matte`,
+					excludeTextures: [...(props.excludeTextures || []), tmpInputTex],
+				},
+				exclude: [tmpInputTex],
 			},
-			tmpMatteView,
-			tmpMatteTex,
-			width,
-			height,
-		);
-		ctx.renderer.popTransform();
-		ctx.renderer.popScissor();
+		));
 	}
 
 	// 3. Compile pipeline resources
@@ -629,14 +471,17 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		getRefineEdgeResources(ctx.device, ctx.renderer.format);
 	const sampler = ctx.renderer.samplerCache.getSampler(ctx.device);
 
-	const elapsedSeconds =
-		props.elapsedMs !== undefined ? props.elapsedMs / 1000 : frame / fps;
-	const durationSeconds = props.virtualMedia?.metadata?.durationMs
-		? props.virtualMedia.metadata.durationMs / 1000
-		: props.durationMs !== undefined
-			? props.durationMs / 1000
-			: 0;
+	const { elapsedSeconds, durationSeconds } = signalTiming(props, frame, fps);
 
+	const signalContext = {
+		args,
+		width,
+		height,
+		frame,
+		fps,
+		elapsedSeconds,
+		durationSeconds,
+	};
 	const getSignalView = (
 		res: {
 			val: number;
@@ -645,28 +490,12 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 			handleId?: string | null;
 		},
 		suffix: string,
-	) => {
-		if (res.hasStaticSig && res.sd) {
-			const cacheNodeId =
-				res.sd.nodeId ??
-				res.handleId ??
-				`${props.renderId ?? "refineedge"}_${suffix}`;
-			return signalRegistry.getOrCreate2DTextureView(
-				ctx.device,
-				encoder,
-				cacheNodeId,
-				elapsedSeconds,
-				durationSeconds,
-				res.sd,
-				width,
-				height,
-				props.renderId,
-				frame,
-				fps,
-			);
-		}
-		return signalRegistry.getDummy1x1TextureView(ctx.device);
-	};
+	) =>
+		signalTextureView(
+			signalContext,
+			res,
+			res.handleId ?? `${props.renderId ?? "refineedge"}_${suffix}`,
+		);
 
 	const decontamView = getSignalView(decontamRes, "decontam_sig");
 	const radiusView = getSignalView(radiusRes, "radius_sig");
@@ -745,26 +574,11 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	// Pass 1: Horizontal Pass
 	const hBuffer = ctx.renderer.getTemporaryBuffer(hUniformData);
 
-	const hPass = encoder.beginRenderPass({
-		colorAttachments: [
-			{
-				view: outTex1.createView(),
-				loadOp: "clear",
-				storeOp: "store",
-				clearValue: { r: 0, g: 0, b: 0, a: 0 },
-			},
-		],
-	});
-	hPass.setPipeline(pipeline);
-	hPass.setBindGroup(
-		0,
+	drawFullscreenPass(encoder, outTex1.createView(), pipeline, [
 		ctx.device.createBindGroup({
 			layout: uniformLayout,
 			entries: [{ binding: 0, resource: { buffer: hBuffer } }],
 		}),
-	);
-	hPass.setBindGroup(
-		1,
 		ctx.device.createBindGroup({
 			layout: textureLayout,
 			entries: [
@@ -774,34 +588,17 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 				{ binding: 3, resource: sampler },
 			],
 		}),
-	);
-	hPass.setBindGroup(2, sigBindGroup);
-	hPass.draw(4);
-	hPass.end();
+		sigBindGroup,
+	]);
 
 	// Pass 2: Vertical Pass + Defringe & Composite
 	const vBuffer = ctx.renderer.getTemporaryBuffer(vUniformData);
 
-	const vPass = encoder.beginRenderPass({
-		colorAttachments: [
-			{
-				view: outTex2.createView(),
-				loadOp: "clear",
-				storeOp: "store",
-				clearValue: { r: 0, g: 0, b: 0, a: 0 },
-			},
-		],
-	});
-	vPass.setPipeline(pipeline);
-	vPass.setBindGroup(
-		0,
+	drawFullscreenPass(encoder, outTex2.createView(), pipeline, [
 		ctx.device.createBindGroup({
 			layout: uniformLayout,
 			entries: [{ binding: 0, resource: { buffer: vBuffer } }],
 		}),
-	);
-	vPass.setBindGroup(
-		1,
 		ctx.device.createBindGroup({
 			layout: textureLayout,
 			entries: [
@@ -811,29 +608,10 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 				{ binding: 3, resource: sampler },
 			],
 		}),
-	);
-	vPass.setBindGroup(2, sigBindGroup);
-	vPass.draw(4);
-	vPass.end();
+		sigBindGroup,
+	]);
 
 	// 4. Final Pass: draw output into targetView
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		targetWidth,
-		targetHeight,
-		"load",
-	);
-
 	const finalOpacity = props.opacity ?? op.opacity ?? 1.0;
-
-	ctx.renderer.drawTexture(
-		finalPass,
-		outTex2,
-		{ x: 0, y: 0, width: targetWidth, height: targetHeight },
-		{ opacity: finalOpacity },
-	);
-
-	args.pass = finalPass;
+	drawTextureToTarget(args, outTex2, finalOpacity);
 };

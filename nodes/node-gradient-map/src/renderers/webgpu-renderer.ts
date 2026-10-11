@@ -1,6 +1,15 @@
 /// <reference types="webgpu" />
 import type { SignalData } from "@framefields/core";
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	drawChildToTexture,
+	drawFullscreenPass,
+	drawTextureToTarget,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+	signalTiming,
+} from "@framefields/node-sdk/gpu";
 import { parseColor, signalRegistry } from "@framefields/webgpu-renderers";
 import type { GradientMapOperation, GradientStop } from "../shared/config.js";
 
@@ -56,27 +65,7 @@ struct GradientMapUniforms {
 @group(1) @binding(1) var samp       : sampler;
 @group(2) @binding(0) var opacitySigTex : texture_2d<f32>;
 @group(2) @binding(1) var signalSamp    : sampler;
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 fn ditherNoise(pos: vec2<f32>) -> f32 {
 	let p = fract(pos * vec2<f32>(0.1031, 0.1030));
@@ -149,62 +138,34 @@ function getGradientMapResources(
 	let res = deviceResourceCache.get(device);
 	if (res) return res;
 
-	const uniformLayout = device.createBindGroupLayout({
-		label: "GradientMapUniformLayout",
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
+	const uniformLayout = fragmentBindGroupLayout(
+		device,
+		["uniform"],
+		"GradientMapUniformLayout",
+	);
 
-	const textureLayout = device.createBindGroupLayout({
-		label: "GradientMapTextureLayout",
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
+	const textureLayout = fragmentBindGroupLayout(
+		device,
+		["texture", "sampler"],
+		"GradientMapTextureLayout",
+	);
 
-	const signalLayout = device.createBindGroupLayout({
-		label: "GradientMapSignalLayout",
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
+	const signalLayout = fragmentBindGroupLayout(
+		device,
+		["texture", "sampler"],
+		"GradientMapSignalLayout",
+	);
 
 	const module = device.createShaderModule({
 		label: "GradientMapShaderModule",
 		code: WGSL_GRADIENT_MAP_SHADER,
 	});
 
-	const pipeline = device.createRenderPipeline({
+	const pipeline = createFullscreenPipeline(device, {
 		label: "GradientMapPipeline",
-		layout: device.createPipelineLayout({
-			bindGroupLayouts: [uniformLayout, textureLayout, signalLayout],
-		}),
-		vertex: { module, entryPoint: "vs" },
-		fragment: { module, entryPoint: "fs", targets: [{ format }] },
-		primitive: { topology: "triangle-strip" },
+		module,
+		layouts: [uniformLayout, textureLayout, signalLayout],
+		format,
 	});
 
 	res = {
@@ -224,12 +185,10 @@ export const GradientMapWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		ctx,
 		encoder,
 		pass,
-		targetView,
 		targetTexture,
 		targetWidth,
 		targetHeight,
 		props,
-		drawChild,
 	} = args;
 
 	const frame = props.frame ?? 0;
@@ -247,37 +206,7 @@ export const GradientMapWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const width = targetWidth;
 	const height = targetHeight;
 
-	const tmpTex = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const tmpView = tmpTex.createView();
-
-	const childPass = ctx.renderer.beginFrame(
-		encoder,
-		tmpView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	childPass.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		childMedia,
-		{
-			...props,
-			virtualMedia: childMedia,
-		},
-		tmpView,
-		tmpTex,
-		width,
-		height,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	const { texture: tmpTex } = await drawChildToTexture(args, childMedia);
 
 	// Parse stops
 	const rawStops: GradientStop[] = Array.isArray(op.stops)
@@ -313,13 +242,7 @@ export const GradientMapWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		opacityVal = Number(opacitySignalInput.outputItem.data ?? 1.0);
 	}
 
-	const elapsedSeconds =
-		props.elapsedMs !== undefined ? props.elapsedMs / 1000 : frame / fps;
-	const durationSeconds = props.virtualMedia?.metadata?.durationMs
-		? props.virtualMedia.metadata.durationMs / 1000
-		: props.durationMs !== undefined
-			? props.durationMs / 1000
-			: 0;
+	const { elapsedSeconds, durationSeconds } = signalTiming(props, frame, fps);
 
 	let opacityView: GPUTextureView;
 	if (hasOpacitySig && opacitySigData) {
@@ -379,36 +302,17 @@ export const GradientMapWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		...(props.excludeTextures || []),
 	]);
 
-	const renderPass = encoder.beginRenderPass({
-		colorAttachments: [
-			{
-				view: outTex.createView(),
-				loadOp: "clear",
-				storeOp: "store",
-				clearValue: { r: 0, g: 0, b: 0, a: 0 },
-			},
-		],
-	});
-
-	renderPass.setPipeline(pipeline);
-	renderPass.setBindGroup(
-		0,
+	drawFullscreenPass(encoder, outTex.createView(), pipeline, [
 		ctx.device.createBindGroup({
 			layout: uniformLayout,
 			entries: [{ binding: 0, resource: { buffer } }],
 		}),
-	);
-	renderPass.setBindGroup(
-		1,
 		ctx.renderer.bindGroupCache.getBindGroup(
 			ctx.device,
 			textureLayout,
 			tmpTex,
 			sampler,
 		),
-	);
-	renderPass.setBindGroup(
-		2,
 		ctx.device.createBindGroup({
 			layout: signalLayout,
 			entries: [
@@ -416,25 +320,7 @@ export const GradientMapWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 				{ binding: 1, resource: sampler },
 			],
 		}),
-	);
-	renderPass.draw(4);
-	renderPass.end();
+	]);
 
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		targetWidth,
-		targetHeight,
-		"load",
-	);
-
-	ctx.renderer.drawTexture(
-		finalPass,
-		outTex,
-		{ x: 0, y: 0, width: targetWidth, height: targetHeight },
-		{ opacity: props.opacity ?? 1 },
-	);
-
-	(args as unknown as { pass: GPURenderPassEncoder }).pass = finalPass;
+	drawTextureToTarget(args, outTex, props.opacity ?? 1);
 };

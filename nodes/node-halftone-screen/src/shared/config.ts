@@ -2,6 +2,7 @@ import {
 	ColorSchema,
 	configBuilder,
 	ImageResultSchema,
+	OperationInputsSchema,
 	VideoResultSchema,
 } from "@framefields/node-sdk";
 import { z } from "zod";
@@ -124,21 +125,7 @@ export const HalftoneScreenOperationSchema =
 		yellowAngleHandleId: z.string().nullable().optional(),
 		blackAngleHandleId: z.string().nullable().optional(),
 		opacityHandleId: z.string().nullable().optional(),
-		inputs: z
-			.record(
-				z.string(),
-				z.object({
-					connectionValid: z.boolean(),
-					outputItem: z
-						.object({
-							type: z.string(),
-							data: z.unknown(),
-						})
-						.nullable()
-						.optional(),
-				}),
-			)
-			.optional(),
+		inputs: OperationInputsSchema.optional(),
 	});
 
 export type HalftoneScreenOperation = z.infer<

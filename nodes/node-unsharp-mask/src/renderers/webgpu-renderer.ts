@@ -1,7 +1,20 @@
 /// <reference types="webgpu" />
 import type { SignalData } from "@framefields/core";
-import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
-import { signalRegistry } from "@framefields/webgpu-renderers";
+import {
+	resolveHandleParam,
+	type WebGPUNodeRenderer,
+} from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	drawChildToTexture,
+	drawFullscreenPass,
+	drawTextureToTarget,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+	signalTextureView,
+	signalTiming,
+	texturesLayout,
+} from "@framefields/node-sdk/gpu";
 import { MAX_AMOUNT, MAX_RADIUS, MAX_THRESHOLD } from "../shared/config.js";
 
 interface UnsharpMaskOp {
@@ -54,27 +67,7 @@ struct UnsharpMaskUniforms {
 @group(2) @binding(1) var amountSigTex        : texture_2d<f32>;
 @group(2) @binding(2) var thresholdSigTex     : texture_2d<f32>;
 @group(2) @binding(3) var signalSamp          : sampler;
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
 	let dimensions = vec2<f32>(textureDimensions(tex));
@@ -165,60 +158,15 @@ function getUnsharpMaskResources(
 	const cached = deviceResourceCache.get(device);
 	if (cached) return cached;
 
-	const uniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
+	const uniformLayout = fragmentBindGroupLayout(device, ["uniform"]);
 
-	const textureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-			{
-				binding: 2,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-		],
-	});
+	const textureLayout = fragmentBindGroupLayout(device, [
+		"texture",
+		"sampler",
+		"texture",
+	]);
 
-	const signalTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 2,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 3,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
+	const signalTextureLayout = texturesLayout(device, 3);
 
 	const shaderModule = device.createShaderModule({
 		code: WGSL_UNSHARPMASK_UNIFORMS,
@@ -228,20 +176,10 @@ function getUnsharpMaskResources(
 		bindGroupLayouts: [uniformLayout, textureLayout, signalTextureLayout],
 	});
 
-	const pipeline = device.createRenderPipeline({
-		layout: pipelineLayout,
-		vertex: {
-			module: shaderModule,
-			entryPoint: "vs",
-		},
-		fragment: {
-			module: shaderModule,
-			entryPoint: "fs",
-			targets: [{ format: targetFormat }],
-		},
-		primitive: {
-			topology: "triangle-strip",
-		},
+	const pipeline = createFullscreenPipeline(device, {
+		module: shaderModule,
+		layouts: pipelineLayout,
+		format: targetFormat,
 	});
 
 	const res: DeviceUnsharpMaskResources = {
@@ -259,12 +197,10 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		ctx,
 		encoder,
 		pass,
-		targetView,
 		targetTexture,
 		targetWidth,
 		targetHeight,
 		props,
-		drawChild,
 	} = args;
 
 	const op = props.virtualMedia?.operation as UnsharpMaskOp | undefined;
@@ -287,38 +223,14 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		fallbackVal: number,
 		clampMin = 0,
 		clampMax = 1000,
-	): {
-		val: number;
-		hasStaticSig: boolean;
-		sd: UnsharpMaskSignalData | null;
-	} => {
-		if (handleId && op.inputs?.[handleId]?.connectionValid) {
-			const outputItem = op.inputs[handleId].outputItem;
-			if (outputItem?.type === "Number") {
-				const numVal =
-					typeof outputItem.data === "number"
-						? outputItem.data
-						: ((outputItem.data as { value?: number })?.value ?? fallbackVal);
-				return {
-					val: Math.max(clampMin, Math.min(clampMax, numVal)),
-					hasStaticSig: false,
-					sd: null,
-				};
-			}
-			if (outputItem?.type === "Signal" && outputItem.data) {
-				return {
-					val: fallbackVal,
-					hasStaticSig: true,
-					sd: outputItem.data as UnsharpMaskSignalData,
-				};
-			}
-		}
-		return {
-			val: Math.max(clampMin, Math.min(clampMax, fallbackVal)),
-			hasStaticSig: false,
-			sd: null,
-		};
-	};
+	) =>
+		resolveHandleParam<UnsharpMaskSignalData>(
+			op.inputs,
+			handleId,
+			fallbackVal,
+			clampMin,
+			clampMax,
+		);
 
 	const amountRes = resolveField(
 		op.amountHandleId,
@@ -340,34 +252,7 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	);
 
 	// 1. Render child media into temporary input texture
-	const tmpTex = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const tmpView = tmpTex.createView();
-
-	const childPass = ctx.renderer.beginFrame(
-		encoder,
-		tmpView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	childPass.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		childMedia,
-		{ ...props, virtualMedia: childMedia },
-		tmpView,
-		tmpTex,
-		width,
-		height,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	const { texture: tmpTex } = await drawChildToTexture(args, childMedia);
 
 	// 2. Fetch static resources and compile pipeline once
 	const {
@@ -379,14 +264,17 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 
 	const sampler = ctx.renderer.samplerCache.getSampler(ctx.device);
 
-	const elapsedSeconds =
-		props.elapsedMs !== undefined ? props.elapsedMs / 1000 : frame / fps;
-	const durationSeconds = props.virtualMedia?.metadata?.durationMs
-		? props.virtualMedia.metadata.durationMs / 1000
-		: props.durationMs !== undefined
-			? props.durationMs / 1000
-			: 0;
+	const { elapsedSeconds, durationSeconds } = signalTiming(props, frame, fps);
 
+	const signalContext = {
+		args,
+		width,
+		height,
+		frame,
+		fps,
+		elapsedSeconds,
+		durationSeconds,
+	};
 	const getSignalView = (
 		res: {
 			val: number;
@@ -394,24 +282,7 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 			sd: UnsharpMaskSignalData | null;
 		},
 		suffix: string,
-	) => {
-		if (res.hasStaticSig && res.sd) {
-			return signalRegistry.getOrCreate2DTextureView(
-				ctx.device,
-				encoder,
-				res.sd.nodeId ?? `${nodeId}_${suffix}`,
-				elapsedSeconds,
-				durationSeconds,
-				res.sd,
-				width,
-				height,
-				props.renderId,
-				frame,
-				fps,
-			);
-		}
-		return signalRegistry.getDummy1x1TextureView(ctx.device);
-	};
+	) => signalTextureView(signalContext, res, `${nodeId}_${suffix}`);
 
 	const radiusView = getSignalView(radiusRes, "radius_sig");
 	const amountView = getSignalView(amountRes, "amount_sig");
@@ -470,28 +341,14 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	unsharpMaskUniformData[8] = 0.0; // isSecondPass = false
 	const hBuffer = ctx.renderer.getTemporaryBuffer(unsharpMaskUniformData);
 
-	const hPass = encoder.beginRenderPass({
-		colorAttachments: [
-			{
-				view: outTex1.createView(),
-				loadOp: "clear",
-				storeOp: "store",
-				clearValue: { r: 0, g: 0, b: 0, a: 0 },
-			},
-		],
-	});
-	hPass.setPipeline(pipeline);
-	hPass.setBindGroup(
-		0,
+	drawFullscreenPass(encoder, outTex1.createView(), pipeline, [
 		ctx.device.createBindGroup({
 			layout: uLayout,
 			entries: [{ binding: 0, resource: { buffer: hBuffer } }],
 		}),
-	);
-	hPass.setBindGroup(1, createUnsharpMaskBindGroup(tmpTex, tmpTex));
-	hPass.setBindGroup(2, sigBindGroup);
-	hPass.draw(4);
-	hPass.end();
+		createUnsharpMaskBindGroup(tmpTex, tmpTex),
+		sigBindGroup,
+	]);
 
 	// Pass 2: Vertical Gaussian convolution + Precision Unsharp Mask against original tmpTex
 	unsharpMaskUniformData[0] = 0.0;
@@ -499,45 +356,15 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	unsharpMaskUniformData[8] = 1.0; // isSecondPass = true
 	const vBuffer = ctx.renderer.getTemporaryBuffer(unsharpMaskUniformData);
 
-	const vPass = encoder.beginRenderPass({
-		colorAttachments: [
-			{
-				view: outTex2.createView(),
-				loadOp: "clear",
-				storeOp: "store",
-				clearValue: { r: 0, g: 0, b: 0, a: 0 },
-			},
-		],
-	});
-	vPass.setPipeline(pipeline);
-	vPass.setBindGroup(
-		0,
+	drawFullscreenPass(encoder, outTex2.createView(), pipeline, [
 		ctx.device.createBindGroup({
 			layout: uLayout,
 			entries: [{ binding: 0, resource: { buffer: vBuffer } }],
 		}),
-	);
-	vPass.setBindGroup(1, createUnsharpMaskBindGroup(outTex1, tmpTex));
-	vPass.setBindGroup(2, sigBindGroup);
-	vPass.draw(4);
-	vPass.end();
+		createUnsharpMaskBindGroup(outTex1, tmpTex),
+		sigBindGroup,
+	]);
 
 	// 3. Final Pass: Draw result back to targetView using standard drawTexture for blending/opacity
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		targetWidth,
-		targetHeight,
-		"load",
-	);
-
-	ctx.renderer.drawTexture(
-		finalPass,
-		outTex2,
-		{ x: 0, y: 0, width: targetWidth, height: targetHeight },
-		{ opacity: op.opacity ?? 1.0 },
-	);
-
-	args.pass = finalPass;
+	drawTextureToTarget(args, outTex2, op.opacity ?? 1.0);
 };

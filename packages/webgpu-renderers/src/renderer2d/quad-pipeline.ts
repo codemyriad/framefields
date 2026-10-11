@@ -1,8 +1,9 @@
 import { quadWgsl } from "../shaders/quad.js";
 import type { BindGroupCache } from "./bind-group-cache.js";
 import type { DrawOpts, Rect } from "./index.js";
-import { UniformBindGroupCache } from "./uniform-bind-group-cache.js";
+import { createUniformLayout, PREMULTIPLIED_OVER } from "./pipeline-utils.js";
 import type { TransformStack } from "./transform-stack.js";
+import { UniformBindGroupCache } from "./uniform-bind-group-cache.js";
 
 class BufferPool {
 	private buffers: GPUBuffer[] = [];
@@ -67,15 +68,7 @@ export class QuadPipeline {
 			code: quadWgsl,
 		});
 
-		this.uniformLayout = device.createBindGroupLayout({
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-					buffer: { type: "uniform" },
-				},
-			],
-		});
+		this.uniformLayout = createUniformLayout(device);
 
 		this.textureLayout = device.createBindGroupLayout({
 			entries: [
@@ -118,18 +111,7 @@ export class QuadPipeline {
 				targets: [
 					{
 						format,
-						blend: {
-							color: {
-								srcFactor: "one",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-							alpha: {
-								srcFactor: "one",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-						},
+						blend: PREMULTIPLIED_OVER,
 					},
 				],
 			},

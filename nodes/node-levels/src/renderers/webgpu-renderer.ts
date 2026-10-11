@@ -1,6 +1,17 @@
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	drawChildToTexture,
+	drawFullscreenPass,
+	drawTextureToTarget,
+	fragmentBindGroupLayout,
+} from "@framefields/node-sdk/gpu";
 import { colorMatrixWgsl } from "@framefields/webgpu-renderers";
-import { type LevelChannel, type LevelsOperation, defaultLevelChannel } from "../shared/config.js";
+import {
+	defaultLevelChannel,
+	type LevelChannel,
+	type LevelsOperation,
+} from "../shared/config.js";
 
 interface DeviceLevelsResources {
 	colorMatrixPipeline: GPURenderPipeline;
@@ -14,48 +25,25 @@ const colorMatrixData = new Float32Array(20);
 function getColorMatrixResources(device: GPUDevice, format: GPUTextureFormat) {
 	let res = deviceResourceCache.get(device);
 	if (!res) {
-		const colorMatrixUniformLayout = device.createBindGroupLayout({
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.FRAGMENT,
-					buffer: { type: "uniform" },
-				},
-			],
-		});
+		const colorMatrixUniformLayout = fragmentBindGroupLayout(device, [
+			"uniform",
+		]);
 
-		const singleTextureLayout = device.createBindGroupLayout({
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.FRAGMENT,
-					texture: { sampleType: "float" },
-				},
-				{
-					binding: 1,
-					visibility: GPUShaderStage.FRAGMENT,
-					sampler: { type: "filtering" },
-				},
-			],
-		});
+		const singleTextureLayout = fragmentBindGroupLayout(device, [
+			"texture",
+			"sampler",
+		]);
 
 		const colorMatrixModule = device.createShaderModule({
 			label: "color-matrix.wgsl",
 			code: colorMatrixWgsl,
 		});
 
-		const colorMatrixPipeline = device.createRenderPipeline({
+		const colorMatrixPipeline = createFullscreenPipeline(device, {
 			label: "ColorMatrixPipeline",
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [colorMatrixUniformLayout, singleTextureLayout],
-			}),
-			vertex: { module: colorMatrixModule, entryPoint: "vs" },
-			fragment: {
-				module: colorMatrixModule,
-				entryPoint: "fs",
-				targets: [{ format }],
-			},
-			primitive: { topology: "triangle-strip" },
+			module: colorMatrixModule,
+			layouts: [colorMatrixUniformLayout, singleTextureLayout],
+			format,
 		});
 
 		res = {
@@ -81,12 +69,10 @@ export const LevelsWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		ctx,
 		encoder,
 		pass,
-		targetView,
 		targetTexture,
 		targetWidth,
 		targetHeight,
 		props,
-		drawChild,
 	} = args;
 	const op = props.virtualMedia?.operation as unknown as
 		| LevelsOperation
@@ -138,36 +124,7 @@ export const LevelsWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const width = targetWidth;
 	const height = targetHeight;
 
-	const tmpTex = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const tmpView = tmpTex.createView();
-
-	const childPass = ctx.renderer.beginFrame(
-		encoder,
-		tmpView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	childPass.end();
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		childMedia,
-		{
-			...props,
-			virtualMedia: childMedia,
-		},
-		tmpView,
-		tmpTex,
-		width,
-		height,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	const { texture: tmpTex } = await drawChildToTexture(args, childMedia);
 
 	// Apply Color Matrix
 	const {
@@ -210,51 +167,18 @@ export const LevelsWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		targetTexture,
 		...(props.excludeTextures || []),
 	]);
-	const renderPass = encoder.beginRenderPass({
-		colorAttachments: [
-			{
-				view: outTex.createView(),
-				loadOp: "clear",
-				storeOp: "store",
-				clearValue: { r: 0, g: 0, b: 0, a: 0 },
-			},
-		],
-	});
-
-	renderPass.setPipeline(pipeline!);
-	renderPass.setBindGroup(
-		0,
+	drawFullscreenPass(encoder, outTex.createView(), pipeline!, [
 		ctx.device.createBindGroup({
 			layout: uLayout!,
 			entries: [{ binding: 0, resource: { buffer } }],
 		}),
-	);
-	renderPass.setBindGroup(
-		1,
 		ctx.renderer.bindGroupCache.getBindGroup(
 			ctx.device,
 			tLayout!,
 			tmpTex,
 			sampler,
 		),
-	);
-	renderPass.draw(4);
-	renderPass.end();
+	]);
 
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		targetWidth,
-		targetHeight,
-		"load",
-	);
-	ctx.renderer.drawTexture(
-		finalPass,
-		outTex,
-		{ x: 0, y: 0, width: targetWidth, height: targetHeight },
-		{ opacity: props.opacity ?? 1 },
-	);
-
-	(args as any).pass = finalPass;
+	drawTextureToTarget(args, outTex, props.opacity ?? 1);
 };

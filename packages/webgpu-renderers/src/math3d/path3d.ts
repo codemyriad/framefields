@@ -307,24 +307,28 @@ export class Path3D {
 			}
 		}
 
-		// Compute cumulative arc-length distances
+		return Path3D.fromRawSamples(rawSamples);
+	}
+
+	/** Samples annotated with their cumulative arc length along the path. */
+	private static fromRawSamples(
+		rawSamples: Array<{ position: Vec3; tangent: Vec3 }>,
+	): Path3D {
 		let cumulativeDist = 0;
-		const samples: Path3DSample[] = [{
-			position: rawSamples[0].position,
-			tangent: rawSamples[0].tangent,
-			distance: 0,
-		}];
-
-		for (let i = 1; i < rawSamples.length; i++) {
-			const d = Vector3Math.distance(rawSamples[i].position, rawSamples[i - 1].position);
-			cumulativeDist += d;
-			samples.push({
-				position: rawSamples[i].position,
-				tangent: rawSamples[i].tangent,
+		const samples: Path3DSample[] = rawSamples.map((sample, i) => {
+			if (i > 0) {
+				cumulativeDist += Vector3Math.distance(
+					sample.position,
+					rawSamples[i - 1].position,
+				);
+			}
+			return {
+				position: sample.position,
+				tangent: sample.tangent,
 				distance: cumulativeDist,
-			});
-		}
-
+			};
+		});
+		if (samples.length === 0) throw new TypeError("Path3D needs samples");
 		return new Path3D(samples);
 	}
 
@@ -368,23 +372,7 @@ export class Path3D {
 			}
 		}
 
-		let cumulativeDist = 0;
-		const samples: Path3DSample[] = [{
-			position: rawSamples[0].position,
-			tangent: rawSamples[0].tangent,
-			distance: 0,
-		}];
-
-		for (let i = 1; i < rawSamples.length; i++) {
-			cumulativeDist += Vector3Math.distance(rawSamples[i].position, rawSamples[i - 1].position);
-			samples.push({
-				position: rawSamples[i].position,
-				tangent: rawSamples[i].tangent,
-				distance: cumulativeDist,
-			});
-		}
-
-		return new Path3D(samples);
+		return Path3D.fromRawSamples(rawSamples);
 	}
 
 	/**
@@ -420,23 +408,7 @@ export class Path3D {
 			rawSamples.push({ position: pos, tangent: Vector3Math.normalize(tanVel) });
 		}
 
-		let cumulativeDist = 0;
-		const samples: Path3DSample[] = [{
-			position: rawSamples[0].position,
-			tangent: rawSamples[0].tangent,
-			distance: 0,
-		}];
-
-		for (let i = 1; i < rawSamples.length; i++) {
-			cumulativeDist += Vector3Math.distance(rawSamples[i].position, rawSamples[i - 1].position);
-			samples.push({
-				position: rawSamples[i].position,
-				tangent: rawSamples[i].tangent,
-				distance: cumulativeDist,
-			});
-		}
-
-		return new Path3D(samples);
+		return Path3D.fromRawSamples(rawSamples);
 	}
 
 	/**
@@ -457,22 +429,6 @@ export class Path3D {
 			rawSamples.push({ position: pos, tangent: Vector3Math.normalize(tanVel) });
 		}
 
-		let cumulativeDist = 0;
-		const pathSamples: Path3DSample[] = [{
-			position: rawSamples[0].position,
-			tangent: rawSamples[0].tangent,
-			distance: 0,
-		}];
-
-		for (let i = 1; i < rawSamples.length; i++) {
-			cumulativeDist += Vector3Math.distance(rawSamples[i].position, rawSamples[i - 1].position);
-			pathSamples.push({
-				position: rawSamples[i].position,
-				tangent: rawSamples[i].tangent,
-				distance: cumulativeDist,
-			});
-		}
-
-		return new Path3D(pathSamples);
+		return Path3D.fromRawSamples(rawSamples);
 	}
 }

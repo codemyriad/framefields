@@ -1,5 +1,11 @@
 /// <reference types="webgpu" />
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	beginTargetPass,
+	drawChildToTexture,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+} from "@framefields/node-sdk/gpu";
 import type { ChannelColorSpace, ChannelSplitterOp } from "../shared/index.js";
 
 const COLOR_SPACE_MAP: Record<ChannelColorSpace, number> = {
@@ -20,27 +26,7 @@ struct SplitterUniforms {
 @group(0) @binding(0) var<uniform> u : SplitterUniforms;
 @group(1) @binding(0) var srcTex     : texture_2d<f32>;
 @group(1) @binding(1) var srcSamp    : sampler;
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 fn srgb2lin(v: f32) -> f32 {
 	let cv = clamp(v, 0.0, 1.0);
@@ -143,30 +129,9 @@ function getDeviceLayouts(device: GPUDevice): SplitterDeviceResources {
 	let res = deviceResourceCache.get(device);
 	if (res) return res;
 
-	const uniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
+	const uniformLayout = fragmentBindGroupLayout(device, ["uniform"]);
 
-	const textureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
+	const textureLayout = fragmentBindGroupLayout(device, ["texture", "sampler"]);
 
 	res = {
 		uniformLayout,
@@ -211,17 +176,7 @@ function getPipeline(
 export const ChannelSplitterWebGPURenderer: WebGPUNodeRenderer = async (
 	args,
 ) => {
-	const {
-		ctx,
-		encoder,
-		pass,
-		targetView,
-		targetTexture,
-		targetWidth,
-		targetHeight,
-		props,
-		drawChild,
-	} = args;
+	const { ctx, pass, targetTexture, props } = args;
 
 	const op = props.virtualMedia?.operation as ChannelSplitterOp | undefined;
 	if (op?.op !== "ChannelSplitter" || !op) return;
@@ -232,43 +187,14 @@ export const ChannelSplitterWebGPURenderer: WebGPUNodeRenderer = async (
 	// End previous pass
 	pass.end();
 
-	const width = targetWidth;
-	const height = targetHeight;
-
 	// Draw source child into temp texture
-	const srcTex = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const srcView = srcTex.createView();
-
-	const srcClearPass = ctx.renderer.beginFrame(
-		encoder,
-		srcView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	srcClearPass.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		sourceMedia,
-		{
+	const { view: srcView } = await drawChildToTexture(args, sourceMedia, {
+		props: {
 			...props,
 			virtualMedia: sourceMedia,
 			renderId: `${props.renderId}-src`,
-			excludeTextures: [...(props.excludeTextures || []), srcTex],
 		},
-		srcView,
-		srcTex,
-		width,
-		height,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	});
 
 	// Close pass opened by drawChild
 	args.pass.end();
@@ -300,19 +226,10 @@ export const ChannelSplitterWebGPURenderer: WebGPUNodeRenderer = async (
 		],
 	});
 
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"load",
-	);
+	const finalPass = beginTargetPass(args);
 
 	finalPass.setPipeline(pipeline);
 	finalPass.setBindGroup(0, uniformBindGroup);
 	finalPass.setBindGroup(1, textureBindGroup);
 	finalPass.draw(4, 1, 0, 0);
-
-	args.pass = finalPass;
 };

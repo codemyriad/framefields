@@ -4,13 +4,14 @@ import { BufferPool } from "./buffer-pool.js";
 import type { Color, DrawOpts } from "./index.js";
 import {
 	dashPathSegments,
-	parseSvgPathToSegments,
 	type PathSegment,
 	type Point,
+	parseSvgPathToSegments,
 	trimPathSegments,
 } from "./path-geometry.js";
-import { UniformBindGroupCache } from "./uniform-bind-group-cache.js";
+import { createUniformLayout, createVec2Pipeline } from "./pipeline-utils.js";
 import type { TransformStack } from "./transform-stack.js";
+import { UniformBindGroupCache } from "./uniform-bind-group-cache.js";
 
 export interface PathDrawOpts extends DrawOpts {
 	trimStart?: number;
@@ -47,92 +48,34 @@ export class PathPipeline {
 			code: pathWgsl,
 		});
 
-		this.uniformLayout = device.createBindGroupLayout({
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-					buffer: { type: "uniform" },
-				},
-			],
-		});
+		this.uniformLayout = createUniformLayout(device);
 
-		this.pipeline = device.createRenderPipeline({
+		this.pipeline = createVec2Pipeline(device, {
 			label: "PathPipeline",
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [this.uniformLayout],
-			}),
-			vertex: {
-				module,
-				entryPoint: "vs",
-				buffers: [
-					{
-						arrayStride: 8,
-						attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }],
-					},
-				],
-			},
-			fragment: {
-				module,
-				entryPoint: "fs",
-				targets: [
-					{
-						format,
-						blend: {
-							color: {
-								srcFactor: "one",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-							alpha: {
-								srcFactor: "one",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-						},
-					},
-				],
-			},
-			primitive: { topology: "triangle-strip" },
+			module,
+			uniformLayout: this.uniformLayout,
+			format,
+			topology: "triangle-strip",
 		});
 
-		this.maxPipeline = device.createRenderPipeline({
+		this.maxPipeline = createVec2Pipeline(device, {
 			label: "PathPipeline.max",
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [this.uniformLayout],
-			}),
-			vertex: {
-				module,
-				entryPoint: "vs",
-				buffers: [
-					{
-						arrayStride: 8,
-						attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }],
-					},
-				],
+			module,
+			uniformLayout: this.uniformLayout,
+			format,
+			topology: "triangle-strip",
+			blend: {
+				color: {
+					srcFactor: "one",
+					dstFactor: "one",
+					operation: "max",
+				},
+				alpha: {
+					srcFactor: "one",
+					dstFactor: "one",
+					operation: "max",
+				},
 			},
-			fragment: {
-				module,
-				entryPoint: "fs",
-				targets: [
-					{
-						format,
-						blend: {
-							color: {
-								srcFactor: "one",
-								dstFactor: "one",
-								operation: "max",
-							},
-							alpha: {
-								srcFactor: "one",
-								dstFactor: "one",
-								operation: "max",
-							},
-						},
-					},
-				],
-			},
-			primitive: { topology: "triangle-strip" },
 		});
 	}
 
@@ -339,4 +282,3 @@ export class PathPipeline {
 		this.uniformBindGroupCache.destroy();
 	}
 }
-

@@ -1,6 +1,17 @@
 /// <reference types="webgpu" />
 import type { SignalData, VirtualMediaData } from "@framefields/core";
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	drawChildToTexture,
+	drawFullscreenPass,
+	drawTextureToTarget,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+	perDevice,
+	signalTiming,
+	texturesLayout,
+} from "@framefields/node-sdk/gpu";
 import { signalRegistry } from "@framefields/webgpu-renderers";
 
 // FIX (P1): `mapMedia` is now a first-class, typed field instead of being
@@ -65,27 +76,7 @@ struct DisplacementUniforms {
 @group(3) @binding(0) var sigXTex    : texture_2d<f32>;
 @group(3) @binding(1) var sigYTex    : texture_2d<f32>;
 @group(3) @binding(2) var sigSamp    : sampler;
-
-struct VSOut {
-    @builtin(position) pos : vec4<f32>,
-    @location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-    var pos = array<vec2<f32>, 4>(
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(1.0, -1.0)
-    );
-    var uv = array<vec2<f32>, 4>(
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(1.0, 0.0),
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 1.0)
-    );
-    return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 fn extractChannel(color: vec4<f32>, channel: f32) -> f32 {
     if (channel < 0.5) { return color.r; }
@@ -149,18 +140,6 @@ fn applyWrap(coord: f32, mode: f32) -> f32 {
 }
 `;
 
-interface DeviceDisplacementResources {
-	uniformLayout: GPUBindGroupLayout;
-	srcTextureLayout: GPUBindGroupLayout;
-	mapTextureLayout: GPUBindGroupLayout;
-	signalTextureLayout: GPUBindGroupLayout;
-	pipelineCache: Map<string, GPURenderPipeline>;
-}
-
-const deviceResourceCache = new WeakMap<
-	GPUDevice,
-	DeviceDisplacementResources
->();
 // NOTE (P3, not changed): module-scoped and reused across every invocation
 // (including recursive/nested displacement nodes). Currently safe because
 // there is no `await` between filling this array and the synchronous
@@ -169,80 +148,13 @@ const deviceResourceCache = new WeakMap<
 // this function-scoped if that invariant ever changes.
 const uniformData = new Float32Array(8);
 
-function getDeviceLayouts(device: GPUDevice): DeviceDisplacementResources {
-	let res = deviceResourceCache.get(device);
-	if (res) return res;
-
-	const uniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
-
-	const srcTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-
-	const mapTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-
-	const signalTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 2,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-
-	res = {
-		uniformLayout,
-		srcTextureLayout,
-		mapTextureLayout,
-		signalTextureLayout,
-		pipelineCache: new Map(),
-	};
-	deviceResourceCache.set(device, res);
-	return res;
-}
+const getDeviceLayouts = perDevice((device) => ({
+	uniformLayout: fragmentBindGroupLayout(device, ["uniform"]),
+	srcTextureLayout: fragmentBindGroupLayout(device, ["texture", "sampler"]),
+	mapTextureLayout: fragmentBindGroupLayout(device, ["texture", "sampler"]),
+	signalTextureLayout: texturesLayout(device, 2),
+	pipelineCache: new Map<string, GPURenderPipeline>(),
+}));
 
 function getDisplacementResources(device: GPUDevice, format: GPUTextureFormat) {
 	const layouts = getDeviceLayouts(device);
@@ -255,23 +167,16 @@ function getDisplacementResources(device: GPUDevice, format: GPUTextureFormat) {
 			code: DISPLACEMENT_MAP_SHADER,
 		});
 
-		pipeline = device.createRenderPipeline({
+		pipeline = createFullscreenPipeline(device, {
 			label: `DisplacementMapPipeline_${format}`,
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [
-					layouts.uniformLayout,
-					layouts.srcTextureLayout,
-					layouts.mapTextureLayout,
-					layouts.signalTextureLayout,
-				],
-			}),
-			vertex: { module, entryPoint: "vs" },
-			fragment: {
-				module,
-				entryPoint: "fs",
-				targets: [{ format }],
-			},
-			primitive: { topology: "triangle-strip" },
+			module,
+			layouts: [
+				layouts.uniformLayout,
+				layouts.srcTextureLayout,
+				layouts.mapTextureLayout,
+				layouts.signalTextureLayout,
+			],
+			format,
 		});
 		layouts.pipelineCache.set(cacheKey, pipeline);
 	}
@@ -366,12 +271,10 @@ export const DisplacementMapWebGPURenderer: WebGPUNodeRenderer = async (
 		ctx,
 		encoder,
 		pass,
-		targetView,
 		targetTexture,
 		targetWidth,
 		targetHeight,
 		props,
-		drawChild,
 	} = args;
 
 	const op = props.virtualMedia?.operation as DisplacementMapOp | undefined;
@@ -395,39 +298,13 @@ export const DisplacementMapWebGPURenderer: WebGPUNodeRenderer = async (
 	const strengthYInfo = resolveSignalField(op, "strengthY", 50);
 
 	// --- Draw source child into srcTex ---
-	const srcTex = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const srcView = srcTex.createView();
-
-	const srcClearPass = ctx.renderer.beginFrame(
-		encoder,
-		srcView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	srcClearPass.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		sourceMedia,
-		{
+	const { texture: srcTex } = await drawChildToTexture(args, sourceMedia, {
+		props: {
 			...props,
 			virtualMedia: sourceMedia,
 			renderId: `${props.renderId}-c0`,
-			excludeTextures: [...(props.excludeTextures || []), srcTex],
 		},
-		srcView,
-		srcTex,
-		width,
-		height,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	});
 
 	// FIX (P0 - CRITICAL): drawChild leaves its own last-active pass open on
 	// `args.pass` (targeting srcView), matching the same "caller closes it"
@@ -441,40 +318,15 @@ export const DisplacementMapWebGPURenderer: WebGPUNodeRenderer = async (
 	args.pass.end();
 
 	// --- Draw map child into mapTex ---
-	const mapTex = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-		srcTex,
-	]);
-	const mapView = mapTex.createView();
-
-	const mapClearPass = ctx.renderer.beginFrame(
-		encoder,
-		mapView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	mapClearPass.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		mapMedia,
-		{
+	const { texture: mapTex } = await drawChildToTexture(args, mapMedia, {
+		props: {
 			...props,
 			virtualMedia: mapMedia,
 			renderId: `${props.renderId}-c1`,
-			excludeTextures: [...(props.excludeTextures || []), srcTex, mapTex],
+			excludeTextures: [...(props.excludeTextures || []), srcTex],
 		},
-		mapView,
-		mapTex,
-		width,
-		height,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+		exclude: [srcTex],
+	});
 
 	// End active pass from child drawing
 	args.pass.end();
@@ -494,13 +346,7 @@ export const DisplacementMapWebGPURenderer: WebGPUNodeRenderer = async (
 	let sigXView: GPUTextureView;
 	let sigYView: GPUTextureView;
 
-	const elapsedSeconds =
-		props.elapsedMs !== undefined ? props.elapsedMs / 1000 : frame / fps;
-	const durationSeconds = props.virtualMedia?.metadata?.durationMs
-		? props.virtualMedia.metadata.durationMs / 1000
-		: props.durationMs !== undefined
-			? props.durationMs / 1000
-			: 0;
+	const { elapsedSeconds, durationSeconds } = signalTiming(props, frame, fps);
 
 	if (strengthXInfo.hasSignal && strengthXInfo.sd) {
 		sigXView = signalRegistry.getOrCreate2DTextureView(
@@ -559,45 +405,23 @@ export const DisplacementMapWebGPURenderer: WebGPUNodeRenderer = async (
 	]);
 
 	// --- Render displacement pass ---
-	const renderPass = encoder.beginRenderPass({
-		colorAttachments: [
-			{
-				view: outTex.createView(),
-				loadOp: "clear",
-				storeOp: "store",
-				clearValue: { r: 0, g: 0, b: 0, a: 0 },
-			},
-		],
-	});
-
-	renderPass.setPipeline(pipeline);
-	renderPass.setBindGroup(
-		0,
+	drawFullscreenPass(encoder, outTex.createView(), pipeline, [
 		ctx.device.createBindGroup({
 			layout: uLayout,
 			entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
 		}),
-	);
-	renderPass.setBindGroup(
-		1,
 		ctx.renderer.bindGroupCache.getBindGroup(
 			ctx.device,
 			srcLayout,
 			srcTex,
 			sampler,
 		),
-	);
-	renderPass.setBindGroup(
-		2,
 		ctx.renderer.bindGroupCache.getBindGroup(
 			ctx.device,
 			mapLayout,
 			mapTex,
 			sampler,
 		),
-	);
-	renderPass.setBindGroup(
-		3,
 		ctx.device.createBindGroup({
 			layout: sigLayout,
 			entries: [
@@ -606,26 +430,8 @@ export const DisplacementMapWebGPURenderer: WebGPUNodeRenderer = async (
 				{ binding: 2, resource: sampler },
 			],
 		}),
-	);
-
-	renderPass.draw(4);
-	renderPass.end();
+	]);
 
 	// --- Final pass: draw result to targetView ---
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		targetWidth,
-		targetHeight,
-		"load",
-	);
-	ctx.renderer.drawTexture(
-		finalPass,
-		outTex,
-		{ x: 0, y: 0, width: targetWidth, height: targetHeight },
-		{ opacity: op.opacity ?? 1 },
-	);
-
-	args.pass = finalPass;
+	drawTextureToTarget(args, outTex, op.opacity ?? 1);
 };

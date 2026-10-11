@@ -1,4 +1,9 @@
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	beginTargetPass,
+	drawChildToTexture,
+	fragmentBindGroupLayout,
+} from "@framefields/node-sdk/gpu";
 import { createUniformGrid } from "../shared/utils.js";
 
 const meshWarpWgsl = `
@@ -112,20 +117,10 @@ function getMeshWarpResources(device: GPUDevice, format: GPUTextureFormat) {
 			],
 		});
 
-		const warpTextureLayout = device.createBindGroupLayout({
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.FRAGMENT,
-					texture: { sampleType: "float" },
-				},
-				{
-					binding: 1,
-					visibility: GPUShaderStage.FRAGMENT,
-					sampler: { type: "filtering" },
-				},
-			],
-		});
+		const warpTextureLayout = fragmentBindGroupLayout(device, [
+			"texture",
+			"sampler",
+		]);
 
 		const module = device.createShaderModule({
 			label: "mesh_warp.wgsl",
@@ -174,16 +169,7 @@ function getMeshWarpResources(device: GPUDevice, format: GPUTextureFormat) {
 }
 
 export const MeshWarpWebGPURenderer: WebGPUNodeRenderer = async (args) => {
-	const {
-		ctx,
-		props,
-		drawChild,
-		targetTexture,
-		targetView,
-		targetWidth,
-		targetHeight,
-		encoder,
-	} = args;
+	const { ctx, props, targetWidth, targetHeight } = args;
 	const { virtualMedia } = props;
 	const op = virtualMedia?.operation as any;
 	if (!op || op.op !== "MeshWarp") return;
@@ -206,45 +192,15 @@ export const MeshWarpWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	args.pass.end();
 
 	// 1. Render child into a temporary offscreen texture at its native size
-	const childTex = ctx.renderer.getTemporaryTexture(sourceWidth, sourceHeight, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const childView = childTex.createView();
-
-	const clearPass = ctx.renderer.beginFrame(
-		encoder,
-		childView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		sourceWidth,
-		sourceHeight,
-		"clear",
-	);
-	clearPass.end();
-
-	ctx.renderer.pushScissor({
-		x: 0,
-		y: 0,
+	const { texture: childTex } = await drawChildToTexture(args, childMedia, {
 		width: sourceWidth,
 		height: sourceHeight,
-	});
-	ctx.renderer.pushIdentity();
-
-	await drawChild(
-		childMedia,
-		{
+		props: {
 			...props,
 			containerWidth: sourceWidth,
 			containerHeight: sourceHeight,
 		},
-		childView,
-		childTex,
-		sourceWidth,
-		sourceHeight,
-	);
-
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	});
 
 	// 2. Setup warp rendering to targetView
 	const cols = Number(op.cols) || 3;
@@ -300,14 +256,7 @@ export const MeshWarpWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		sampler,
 	);
 
-	const outPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		targetWidth,
-		targetHeight,
-		"load",
-	);
+	const outPass = beginTargetPass(args);
 
 	outPass.setPipeline(pipeline!);
 	outPass.setBindGroup(0, uniformBindGroup);
@@ -316,6 +265,4 @@ export const MeshWarpWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const cellCount = (cols - 1) * (rows - 1);
 	const vertexCount = cellCount * 6;
 	outPass.draw(vertexCount);
-
-	args.pass = outPass;
 };

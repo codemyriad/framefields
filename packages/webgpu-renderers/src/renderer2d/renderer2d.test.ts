@@ -6,6 +6,7 @@ import {
 	createMockRenderPassEncoder,
 	createMockTexture,
 	ensureDOMGlobals,
+	installMockGPUFlags,
 } from "./test-helpers.js";
 
 describe("Renderer2D", () => {
@@ -18,21 +19,7 @@ describe("Renderer2D", () => {
 
 	beforeEach(() => {
 		mockDevice = createMockDevice();
-		globalThis.GPUBufferUsage = {
-			UNIFORM: 1,
-			VERTEX: 2,
-			COPY_DST: 4,
-		} as any;
-		globalThis.GPUShaderStage = {
-			VERTEX: 1,
-			FRAGMENT: 2,
-		} as any;
-		globalThis.GPUTextureUsage = {
-			TEXTURE_BINDING: 1,
-			COPY_DST: 2,
-			RENDER_ATTACHMENT: 4,
-			COPY_SRC: 8,
-		} as any;
+		installMockGPUFlags();
 
 		renderer = new Renderer2D(mockDevice, "rgba8unorm");
 	});

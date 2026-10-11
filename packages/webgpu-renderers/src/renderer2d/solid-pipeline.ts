@@ -4,6 +4,7 @@ import { solidWgsl } from "../shaders/solid.js";
 import { BufferPool } from "./buffer-pool.js";
 import { asGradient, packGradientUniforms } from "./gradient-uniforms.js";
 import type { Color, DrawOpts, Rect } from "./index.js";
+import { createUniformLayout, createVec2Pipeline } from "./pipeline-utils.js";
 import type { TransformStack } from "./transform-stack.js";
 import { UniformBindGroupCache } from "./uniform-bind-group-cache.js";
 
@@ -42,53 +43,14 @@ export class SolidPipeline {
 			code: solidWgsl,
 		});
 
-		this.uniformLayout = device.createBindGroupLayout({
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-					buffer: { type: "uniform" },
-				},
-			],
-		});
+		this.uniformLayout = createUniformLayout(device);
 
-		this.pipeline = device.createRenderPipeline({
+		this.pipeline = createVec2Pipeline(device, {
 			label: "SolidPipeline",
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [this.uniformLayout],
-			}),
-			vertex: {
-				module,
-				entryPoint: "vs",
-				buffers: [
-					{
-						arrayStride: 8,
-						attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }],
-					},
-				],
-			},
-			fragment: {
-				module,
-				entryPoint: "fs",
-				targets: [
-					{
-						format,
-						blend: {
-							color: {
-								srcFactor: "one",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-							alpha: {
-								srcFactor: "one",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-						},
-					},
-				],
-			},
-			primitive: { topology: "triangle-strip" },
+			module,
+			uniformLayout: this.uniformLayout,
+			format,
+			topology: "triangle-strip",
 		});
 	}
 

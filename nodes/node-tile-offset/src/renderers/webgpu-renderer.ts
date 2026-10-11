@@ -1,7 +1,21 @@
 /// <reference types="webgpu" />
 import type { SignalData } from "@framefields/core";
-import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
-import { signalRegistry } from "@framefields/webgpu-renderers";
+import {
+	unwrapFrameParam,
+	type WebGPUNodeRenderer,
+} from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	drawChildToTexture,
+	drawFullscreenPass,
+	drawTextureToTarget,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+	perDevice,
+	signalTextureView,
+	signalTiming,
+	texturesLayout,
+} from "@framefields/node-sdk/gpu";
 
 interface TileOffsetOp {
 	op: "TileOffset";
@@ -46,27 +60,7 @@ struct TileOffsetUniforms {
 @group(2) @binding(0) var offsetXSigTex : texture_2d<f32>;
 @group(2) @binding(1) var offsetYSigTex : texture_2d<f32>;
 @group(2) @binding(2) var signalSamp    : sampler;
-
-struct VSOut {
-    @builtin(position) pos : vec4<f32>,
-    @location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-    var pos = array<vec2<f32>, 4>(
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(1.0, -1.0)
-    );
-    var uv = array<vec2<f32>, 4>(
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(1.0, 0.0),
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 1.0)
-    );
-    return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
     var offX = u.offsetX;
@@ -109,74 +103,14 @@ struct VSOut {
 }
 `;
 
-interface DeviceTileOffsetResources {
-	uniformLayout: GPUBindGroupLayout;
-	singleTextureLayout: GPUBindGroupLayout;
-	signalTextureLayout: GPUBindGroupLayout;
-	pipelineCache: Map<string, GPURenderPipeline>;
-}
-
-const deviceResourceCache = new WeakMap<GPUDevice, DeviceTileOffsetResources>();
 const uniformData = new Float32Array(8);
 
-function getDeviceLayouts(device: GPUDevice): DeviceTileOffsetResources {
-	let res = deviceResourceCache.get(device);
-	if (res) return res;
-
-	const uniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
-
-	const singleTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-
-	const signalTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 2,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-
-	res = {
-		uniformLayout,
-		singleTextureLayout,
-		signalTextureLayout,
-		pipelineCache: new Map(),
-	};
-	deviceResourceCache.set(device, res);
-	return res;
-}
+const getDeviceLayouts = perDevice((device) => ({
+	uniformLayout: fragmentBindGroupLayout(device, ["uniform"]),
+	singleTextureLayout: fragmentBindGroupLayout(device, ["texture", "sampler"]),
+	signalTextureLayout: texturesLayout(device, 2),
+	pipelineCache: new Map<string, GPURenderPipeline>(),
+}));
 
 function getTileOffsetResources(device: GPUDevice, format: GPUTextureFormat) {
 	const layouts = getDeviceLayouts(device);
@@ -189,22 +123,15 @@ function getTileOffsetResources(device: GPUDevice, format: GPUTextureFormat) {
 			code: TILE_OFFSET_SHADER,
 		});
 
-		pipeline = device.createRenderPipeline({
+		pipeline = createFullscreenPipeline(device, {
 			label: `TileOffsetPipeline_${format}`,
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [
-					layouts.uniformLayout,
-					layouts.singleTextureLayout,
-					layouts.signalTextureLayout,
-				],
-			}),
-			vertex: { module, entryPoint: "vs" },
-			fragment: {
-				module,
-				entryPoint: "fs",
-				targets: [{ format }],
-			},
-			primitive: { topology: "triangle-strip" },
+			module,
+			layouts: [
+				layouts.uniformLayout,
+				layouts.singleTextureLayout,
+				layouts.signalTextureLayout,
+			],
+			format,
 		});
 		layouts.pipelineCache.set(cacheKey, pipeline);
 	}
@@ -222,12 +149,10 @@ export const TileOffsetWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		ctx,
 		encoder,
 		pass,
-		targetView,
 		targetTexture,
 		targetWidth,
 		targetHeight,
 		props,
-		drawChild,
 	} = args;
 
 	const frame = props.frame ?? 0;
@@ -273,28 +198,11 @@ export const TileOffsetWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 			if (input?.connectionValid && input.outputItem?.type === "Number") {
 				val = Number(input.outputItem.data ?? defaultValue);
 			} else {
-				let rawVal = op[configKey] as unknown;
-				if (rawVal !== undefined && rawVal !== null) {
-					if (typeof rawVal === "object") {
-						if (
-							"get" in (rawVal as Record<string, unknown>) &&
-							typeof (rawVal as Record<string, unknown>).get === "function"
-						) {
-							rawVal = (
-								rawVal as {
-									get: (ctx: { frame: number; fps: number }) => unknown;
-								}
-							).get({ frame: compositionFrame, fps });
-						} else if ("value" in (rawVal as Record<string, unknown>)) {
-							rawVal = (rawVal as { value: unknown }).value;
-						}
-					} else if (typeof rawVal === "function") {
-						rawVal = (rawVal as (f: number, fps: number) => unknown)(
-							compositionFrame,
-							fps,
-						);
-					}
-				}
+				const rawVal = unwrapFrameParam(
+					op[configKey],
+					compositionFrame,
+					fps,
+				).value;
 				const numVal = Number(rawVal ?? defaultValue);
 				val = isNaN(numVal) ? defaultValue : numVal;
 			}
@@ -321,34 +229,7 @@ export const TileOffsetWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	}
 
 	// 2. Draw child media to offscreen texture
-	const tmpTex = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const tmpView = tmpTex.createView();
-
-	const childPass = ctx.renderer.beginFrame(
-		encoder,
-		tmpView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	childPass.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		childMedia,
-		{ ...props, virtualMedia: childMedia },
-		tmpView,
-		tmpTex,
-		width,
-		height,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	const { texture: tmpTex } = await drawChildToTexture(args, childMedia);
 
 	// End active pass from drawing child
 	args.pass.end();
@@ -364,14 +245,17 @@ export const TileOffsetWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const sampler = ctx.renderer.samplerCache.getSampler(ctx.device);
 
 	// Fetch dynamic signal texture views on-demand
-	const elapsedSeconds =
-		props.elapsedMs !== undefined ? props.elapsedMs / 1000 : frame / fps;
-	const durationSeconds = props.virtualMedia?.metadata?.durationMs
-		? props.virtualMedia.metadata.durationMs / 1000
-		: props.durationMs !== undefined
-			? props.durationMs / 1000
-			: 0;
+	const { elapsedSeconds, durationSeconds } = signalTiming(props, frame, fps);
 
+	const signalContext = {
+		args,
+		width,
+		height,
+		frame,
+		fps,
+		elapsedSeconds,
+		durationSeconds,
+	};
 	const getSignalView = (
 		res: {
 			val: number;
@@ -379,24 +263,7 @@ export const TileOffsetWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 			sd: TileOffsetSignalData | null;
 		},
 		suffix: string,
-	) => {
-		if (res.hasStaticSig && res.sd) {
-			return signalRegistry.getOrCreate2DTextureView(
-				ctx.device,
-				encoder,
-				res.sd.nodeId ?? `${nodeId}_${suffix}`,
-				elapsedSeconds,
-				durationSeconds,
-				res.sd,
-				width,
-				height,
-				props.renderId,
-				frame,
-				fps,
-			);
-		}
-		return signalRegistry.getDummy1x1TextureView(ctx.device);
-	};
+	) => signalTextureView(signalContext, res, `${nodeId}_${suffix}`);
 
 	const offsetXView = getSignalView(offsetXRes, "offsetX_sig");
 	const offsetYView = getSignalView(offsetYRes, "offsetY_sig");
@@ -421,36 +288,17 @@ export const TileOffsetWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	]);
 
 	// 6. Run tile offset pass
-	const tilePass = encoder.beginRenderPass({
-		colorAttachments: [
-			{
-				view: outTex.createView(),
-				loadOp: "clear",
-				storeOp: "store",
-				clearValue: { r: 0, g: 0, b: 0, a: 0 },
-			},
-		],
-	});
-
-	tilePass.setPipeline(pipeline);
-	tilePass.setBindGroup(
-		0,
+	drawFullscreenPass(encoder, outTex.createView(), pipeline, [
 		ctx.device.createBindGroup({
 			layout: uLayout,
 			entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
 		}),
-	);
-	tilePass.setBindGroup(
-		1,
 		ctx.renderer.bindGroupCache.getBindGroup(
 			ctx.device,
 			tLayout,
 			tmpTex,
 			sampler,
 		),
-	);
-	tilePass.setBindGroup(
-		2,
 		ctx.device.createBindGroup({
 			layout: sigLayout,
 			entries: [
@@ -459,28 +307,10 @@ export const TileOffsetWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 				{ binding: 2, resource: sampler },
 			],
 		}),
-	);
-	tilePass.draw(4);
-	tilePass.end();
+	]);
 
 	// 7. Output result back to targetView
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		targetWidth,
-		targetHeight,
-		"load",
-	);
-
-	ctx.renderer.drawTexture(
-		finalPass,
-		outTex,
-		{ x: 0, y: 0, width: targetWidth, height: targetHeight },
-		{ opacity: op.opacity ?? 1.0 },
-	);
-
-	args.pass = finalPass;
+	drawTextureToTarget(args, outTex, op.opacity ?? 1.0);
 };
 
 export const WebGPURenderer = TileOffsetWebGPURenderer;

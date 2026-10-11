@@ -1,6 +1,7 @@
 import {
 	configBuilder,
 	ImageResultSchema,
+	OperationInputsSchema,
 	VideoResultSchema,
 } from "@framefields/node-sdk";
 import { z } from "zod";
@@ -50,21 +51,7 @@ export const TileOffsetOperationSchema = TileOffsetNodeConfigSchema.extend({
 	metadata: z.record(z.string(), z.unknown()).optional(),
 	offsetXHandleId: z.string().nullable().optional(),
 	offsetYHandleId: z.string().nullable().optional(),
-	inputs: z
-		.record(
-			z.string(),
-			z.object({
-				connectionValid: z.boolean(),
-				outputItem: z
-					.object({
-						type: z.string(),
-						data: z.unknown(),
-					})
-					.nullable()
-					.optional(),
-			}),
-		)
-		.optional(),
+	inputs: OperationInputsSchema.optional(),
 });
 
 export type TileOffsetOperation = z.infer<typeof TileOffsetOperationSchema>;

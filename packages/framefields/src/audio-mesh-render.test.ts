@@ -2,47 +2,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Signal } from "@framefields/core";
-import { Canvas, loadImage } from "skia-canvas";
 import { describe, expect, it } from "vitest";
 import { Composition, Layer, Layer3D, Light } from "./index.js";
-
-interface DecodedImage {
-	width: number;
-	height: number;
-	pixels: Uint8ClampedArray;
-}
-
-async function decodePngPixels(pngBuffer: Buffer): Promise<DecodedImage> {
-	const img = await loadImage(pngBuffer);
-	const canvas = new Canvas(img.width, img.height);
-	const ctx = canvas.getContext("2d");
-	ctx.drawImage(img, 0, 0);
-	const imgData = ctx.getImageData(0, 0, img.width, img.height);
-	return {
-		width: img.width,
-		height: img.height,
-		pixels: imgData.data,
-	};
-}
-
-function computeMse(
-	pixelsA: Uint8ClampedArray,
-	pixelsB: Uint8ClampedArray,
-): number {
-	if (pixelsA.length !== pixelsB.length) {
-		throw new Error(
-			`Pixel buffer size mismatch: ${pixelsA.length} vs ${pixelsB.length}`,
-		);
-	}
-	let sumSquaredDiff = 0;
-	for (let i = 0; i < pixelsA.length; i += 4) {
-		const dr = (pixelsA[i] ?? 0) - (pixelsB[i] ?? 0);
-		const dg = (pixelsA[i + 1] ?? 0) - (pixelsB[i + 1] ?? 0);
-		const db = (pixelsA[i + 2] ?? 0) - (pixelsB[i + 2] ?? 0);
-		sumSquaredDiff += (dr * dr + dg * dg + db * db) / 3;
-	}
-	return sumSquaredDiff / (pixelsA.length / 4);
-}
+import { computeMse, decodePngPixels } from "./test-utils/pixels.js";
 
 // 3D Cylinder / Column mesh with multiple height slices for wave and normal displacement
 function generateCylinderObj(
@@ -233,7 +195,9 @@ describe("Headless WebGPU Audio Latent 3D Mesh Deformation Engine", () => {
 	});
 
 	it("renders harmonic_wave deformation modulated reactively by Signal multiplier", async () => {
-		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "framefields-wave-"));
+		const tmpDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "framefields-wave-"),
+		);
 		const objPath = path.join(tmpDir, "cylinder_wave.obj");
 		await fs.writeFile(objPath, generateCylinderObj(16, 8, 60, 220));
 
@@ -319,16 +283,46 @@ describe("Headless WebGPU Audio Latent 3D Mesh Deformation Engine", () => {
 			backgroundColor: "#080c18",
 		});
 		comp.add(
-			Layer.camera({ id: "cam-bar", x: 320, y: 240, z: -500, targetX: 320, targetY: 240, targetZ: 0 }),
+			Layer.camera({
+				id: "cam-bar",
+				x: 320,
+				y: 240,
+				z: -500,
+				targetX: 320,
+				targetY: 240,
+				targetZ: 0,
+			}),
 		);
 		comp.add(Light.ambient("#ffffff", 0.5));
 		comp.add(
-			Light.directional({ id: "sun", color: "#ffffff", intensity: 1.2, x: 100, y: -300, z: -400, targetX: 320, targetY: 240, targetZ: 0 }),
+			Light.directional({
+				id: "sun",
+				color: "#ffffff",
+				intensity: 1.2,
+				x: 100,
+				y: -300,
+				z: -400,
+				targetX: 320,
+				targetY: 240,
+				targetZ: 0,
+			}),
 		);
-		const bar = Layer3D.obj(objPath, { id: "bar", x: 320, y: 240, z: 0, color: "#f0f0f0", material: "lit" });
+		const bar = Layer3D.obj(objPath, {
+			id: "bar",
+			x: 320,
+			y: 240,
+			z: 0,
+			color: "#f0f0f0",
+			material: "lit",
+		});
 		comp.add(
 			mode
-				? bar.deformWithAudio({ audioTrackId: `bar-${mode}`, audioData: [audioChannel], mode, amplitudeMultiplier: 1.5 })
+				? bar.deformWithAudio({
+						audioTrackId: `bar-${mode}`,
+						audioData: [audioChannel],
+						mode,
+						amplitudeMultiplier: 1.5,
+					})
 				: bar,
 		);
 		const img = await decodePngPixels(await comp.renderFrame({ frame }));

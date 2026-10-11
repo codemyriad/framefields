@@ -136,3 +136,35 @@ export class HeadlessDOMMatrix {
 }
 
 export type HeadlessDOMMatrixLike = HeadlessDOMMatrix;
+
+/** Installs DOMMatrix / DOMPoint where the runtime (Node) lacks them. */
+export function installDOMGeometryGlobals(): void {
+	const domObj = globalThis as unknown as { DOMMatrix?: any; DOMPoint?: any };
+	if (typeof domObj.DOMMatrix === "undefined") {
+		domObj.DOMMatrix = HeadlessDOMMatrix;
+	}
+
+	if (typeof domObj.DOMPoint === "undefined") {
+		domObj.DOMPoint = class DOMPoint {
+			constructor(
+				public x = 0,
+				public y = 0,
+				public z = 0,
+				public w = 1,
+			) {}
+			static fromPoint(other: {
+				x?: number;
+				y?: number;
+				z?: number;
+				w?: number;
+			}) {
+				return new DOMPoint(
+					other.x ?? 0,
+					other.y ?? 0,
+					other.z ?? 0,
+					other.w ?? 1,
+				);
+			}
+		};
+	}
+}

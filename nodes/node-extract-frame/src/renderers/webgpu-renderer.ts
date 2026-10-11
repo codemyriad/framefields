@@ -1,4 +1,5 @@
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import { drawChildToTexture } from "@framefields/node-sdk/gpu";
 
 /**
  * WebGPU renderer for the ExtractFrame operation.
@@ -8,16 +9,7 @@ import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
  * and the child is rendered at the corresponding timestamp.
  */
 export const ExtractFrameWebGPURenderer: WebGPUNodeRenderer = async (args) => {
-	const {
-		ctx,
-		props,
-		drawChild,
-		targetView,
-		targetTexture,
-		targetWidth,
-		targetHeight,
-		encoder,
-	} = args;
+	const { ctx, props, targetView, targetWidth, targetHeight, encoder } = args;
 
 	const { virtualMedia, opacity = 1 } = props;
 	const op = virtualMedia?.operation as Record<string, unknown> | undefined;
@@ -43,34 +35,10 @@ export const ExtractFrameWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const containerHeight = props.containerHeight ?? ctx.surface.height;
 
 	// Render the child into a temporary texture at the specified frame
-	const childTex = ctx.renderer.getTemporaryTexture(sourceWidth, sourceHeight, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const childView = childTex.createView();
-
-	const clearPass = ctx.renderer.beginFrame(
-		encoder,
-		childView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		sourceWidth,
-		sourceHeight,
-		"clear",
-	);
-	clearPass.end();
-
-	ctx.renderer.pushScissor({
-		x: 0,
-		y: 0,
+	const { texture: childTex } = await drawChildToTexture(args, childMedia, {
 		width: sourceWidth,
 		height: sourceHeight,
-	});
-	ctx.renderer.pushIdentity();
-
-	// Override the child's render props to set the specific frame/timestamp
-	await drawChild(
-		childMedia,
-		{
+		props: {
 			...props,
 			containerWidth: sourceWidth,
 			containerHeight: sourceHeight,
@@ -79,14 +47,7 @@ export const ExtractFrameWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 			timestampSec,
 			forceWait: true,
 		},
-		childView,
-		childTex,
-		sourceWidth,
-		sourceHeight,
-	);
-
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	});
 
 	// Draw the result to the target
 	const outPass = ctx.renderer.beginFrame(

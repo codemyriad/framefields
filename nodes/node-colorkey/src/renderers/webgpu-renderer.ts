@@ -1,6 +1,17 @@
 /// <reference types="webgpu" />
 import type { SignalData } from "@framefields/core";
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	drawChildToTexture,
+	drawFullscreenPass,
+	drawTextureToTarget,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+	perDevice,
+	signalTiming,
+	texturesLayout,
+} from "@framefields/node-sdk/gpu";
 import { signalRegistry } from "@framefields/webgpu-renderers";
 
 interface ColorKeyOp {
@@ -52,27 +63,7 @@ struct ColorKeyUniforms {
 @group(2) @binding(1) var smoothnessSigTex  : texture_2d<f32>;
 @group(2) @binding(2) var spillSigTex       : texture_2d<f32>;
 @group(2) @binding(3) var signalSamp        : sampler;
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 fn rgb2yuv(rgb: vec3<f32>) -> vec3<f32> {
 	let y = 0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b;
@@ -168,79 +159,14 @@ fn yuv2rgb(yuv: vec3<f32>) -> vec3<f32> {
 }
 `;
 
-interface DeviceColorKeyResources {
-	uniformLayout: GPUBindGroupLayout;
-	singleTextureLayout: GPUBindGroupLayout;
-	signalTextureLayout: GPUBindGroupLayout;
-	pipelineCache: Map<string, GPURenderPipeline>;
-}
-
-const deviceResourceCache = new WeakMap<GPUDevice, DeviceColorKeyResources>();
 const colorKeyData = new Float32Array(12);
 
-function getDeviceLayouts(device: GPUDevice): DeviceColorKeyResources {
-	let res = deviceResourceCache.get(device);
-	if (res) return res;
-
-	const uniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
-
-	const singleTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-
-	const signalTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 2,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 3,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-
-	res = {
-		uniformLayout,
-		singleTextureLayout,
-		signalTextureLayout,
-		pipelineCache: new Map(),
-	};
-	deviceResourceCache.set(device, res);
-	return res;
-}
+const getDeviceLayouts = perDevice((device) => ({
+	uniformLayout: fragmentBindGroupLayout(device, ["uniform"]),
+	singleTextureLayout: fragmentBindGroupLayout(device, ["texture", "sampler"]),
+	signalTextureLayout: texturesLayout(device, 3),
+	pipelineCache: new Map<string, GPURenderPipeline>(),
+}));
 
 function getColorKeyResources(device: GPUDevice, format: GPUTextureFormat) {
 	const layouts = getDeviceLayouts(device);
@@ -253,22 +179,15 @@ function getColorKeyResources(device: GPUDevice, format: GPUTextureFormat) {
 			code: COLORKEY_SHADER,
 		});
 
-		pipeline = device.createRenderPipeline({
+		pipeline = createFullscreenPipeline(device, {
 			label: `ColorKeyPipeline_${format}`,
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [
-					layouts.uniformLayout,
-					layouts.singleTextureLayout,
-					layouts.signalTextureLayout,
-				],
-			}),
-			vertex: { module: colorKeyModule, entryPoint: "vs" },
-			fragment: {
-				module: colorKeyModule,
-				entryPoint: "fs",
-				targets: [{ format }],
-			},
-			primitive: { topology: "triangle-strip" },
+			module: colorKeyModule,
+			layouts: [
+				layouts.uniformLayout,
+				layouts.singleTextureLayout,
+				layouts.signalTextureLayout,
+			],
+			format,
 		});
 		layouts.pipelineCache.set(cacheKey, pipeline);
 	}
@@ -300,12 +219,10 @@ export const ColorKeyWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		ctx,
 		encoder,
 		pass,
-		targetView,
 		targetTexture,
 		targetWidth,
 		targetHeight,
 		props,
-		drawChild,
 	} = args;
 	const frame = props.frame ?? 0;
 	const fps = props.fps || 30;
@@ -424,35 +341,7 @@ export const ColorKeyWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		hasStaticSpillSig = true;
 	}
 
-	const tmpTex = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const tmpView = tmpTex.createView();
-
-	// Clear intermediate texture
-	const childPass = ctx.renderer.beginFrame(
-		encoder,
-		tmpView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	childPass.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		childMedia,
-		{ ...props, virtualMedia: childMedia },
-		tmpView,
-		tmpTex,
-		width,
-		height,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	const { texture: tmpTex } = await drawChildToTexture(args, childMedia);
 
 	// Fetch static resources and compile pipeline once
 	const {
@@ -465,13 +354,7 @@ export const ColorKeyWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const sampler = ctx.renderer.samplerCache.getSampler(ctx.device);
 
 	// Fetch dynamic signal texture views on-demand
-	const elapsedSeconds =
-		props.elapsedMs !== undefined ? props.elapsedMs / 1000 : frame / fps;
-	const durationSeconds = props.virtualMedia?.metadata?.durationMs
-		? props.virtualMedia.metadata.durationMs / 1000
-		: props.durationMs !== undefined
-			? props.durationMs / 1000
-			: 0;
+	const { elapsedSeconds, durationSeconds } = signalTiming(props, frame, fps);
 
 	let similarityView: GPUTextureView;
 	if (hasStaticSimilaritySig && similaritySd) {
@@ -560,35 +443,17 @@ export const ColorKeyWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 
 	const singleBuffer = ctx.renderer.getTemporaryBuffer(colorKeyData);
 
-	const singlePass = encoder.beginRenderPass({
-		colorAttachments: [
-			{
-				view: outTex.createView(),
-				loadOp: "clear",
-				storeOp: "store",
-				clearValue: { r: 0, g: 0, b: 0, a: 0 },
-			},
-		],
-	});
-	singlePass.setPipeline(pipeline);
-	singlePass.setBindGroup(
-		0,
+	drawFullscreenPass(encoder, outTex.createView(), pipeline, [
 		ctx.device.createBindGroup({
 			layout: uLayout,
 			entries: [{ binding: 0, resource: { buffer: singleBuffer } }],
 		}),
-	);
-	singlePass.setBindGroup(
-		1,
 		ctx.renderer.bindGroupCache.getBindGroup(
 			ctx.device,
 			tLayout,
 			tmpTex,
 			sampler,
 		),
-	);
-	singlePass.setBindGroup(
-		2,
 		ctx.device.createBindGroup({
 			layout: sigLayout,
 			entries: [
@@ -598,25 +463,8 @@ export const ColorKeyWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 				{ binding: 3, resource: sampler },
 			],
 		}),
-	);
-	singlePass.draw(4);
-	singlePass.end();
+	]);
 
 	// Final Pass: Draw result to targetView using standard drawTexture for blending/opacity
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		targetWidth,
-		targetHeight,
-		"load",
-	);
-	ctx.renderer.drawTexture(
-		finalPass,
-		outTex,
-		{ x: 0, y: 0, width: targetWidth, height: targetHeight },
-		{ opacity: op.opacity ?? 1 },
-	);
-
-	args.pass = finalPass;
+	drawTextureToTarget(args, outTex, op.opacity ?? 1);
 };

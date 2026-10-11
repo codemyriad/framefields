@@ -1,11 +1,6 @@
 import type { VirtualMediaData } from "@framefields/core";
-import { HeadlessMediaRenderer } from "@framefields/renderer";
-import {
-	container,
-	rendererLogger,
-	type StorageService,
-	TOKENS,
-} from "@framefields/server-utils";
+import { rendererLogger } from "@framefields/server-utils";
+import { renderAndUpload } from "./render-upload.js";
 
 export interface RenderJobInput {
 	virtualMedia?: VirtualMediaData;
@@ -61,11 +56,6 @@ export async function executeRenderJob(
 			quality,
 		} = jobData;
 
-		const renderer = new HeadlessMediaRenderer();
-		let buffer: Buffer | undefined;
-		let filePath: string | undefined;
-		let contentType: string;
-		let fileCleanup: (() => Promise<void>) | undefined;
 		let probedMeta: any;
 
 		const normalizedType = type.toLowerCase();
@@ -84,52 +74,17 @@ export async function executeRenderJob(
 			);
 		}
 
-		if (normalizedType === "video" || normalizedType === "gif") {
-			const renderResult = await renderer.renderVideo(virtualMedia, {
-				codec,
-				audioCodec,
-				quality,
-			});
-			filePath = renderResult.filePath;
-			fileCleanup = renderResult.cleanup;
-			contentType =
-				codec === "vp8" || codec === "vp9"
-					? "video/webm"
-					: codec === "gif"
-						? "image/gif"
-						: codec === "mp3"
-							? "audio/mpeg"
-							: codec === "aac"
-								? "audio/mp4"
-								: codec === "opus"
-									? "audio/webm"
-									: "video/mp4";
-		} else if (normalizedType === "lut") {
-			buffer = await renderer.renderLut(virtualMedia, frame);
-			contentType = "text/plain";
-		} else {
-			buffer = await renderer.renderImage(virtualMedia, frame);
-			contentType = "image/png";
-		}
-
-		const storage = container.get<StorageService>(TOKENS.STORAGE);
-		if (filePath) {
-			rendererLogger.info(
-				{ filePath },
-				"[HTTP Local] Render complete - uploading file to storage.",
-			);
-			await storage.uploadFileToStorage(filePath, key, contentType, bucket);
-		} else if (buffer) {
-			rendererLogger.info(
-				{ fileSize: buffer.length },
-				"[HTTP Local] Render complete - uploading buffer to storage.",
-			);
-			await storage.uploadToStorage(buffer, key, contentType, bucket);
-		}
-
-		if (fileCleanup) {
-			await fileCleanup().catch(() => {});
-		}
+		await renderAndUpload({
+			virtualMedia,
+			type,
+			frame,
+			codec,
+			audioCodec,
+			quality,
+			key,
+			bucket,
+			logPrefix: "[HTTP Local]",
+		});
 
 		job.status = "COMPLETED";
 		job.output = {

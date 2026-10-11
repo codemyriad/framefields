@@ -1,6 +1,17 @@
 /// <reference types="webgpu" />
 import type { SignalData } from "@framefields/core";
-import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	resolveSignalField,
+	type WebGPUNodeRenderer,
+} from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+	perDevice,
+	signalTiming,
+	texturesLayout,
+} from "@framefields/node-sdk/gpu";
 import { signalRegistry } from "@framefields/webgpu-renderers";
 
 interface NoiseOp {
@@ -73,27 +84,7 @@ struct NoiseUniforms {
 @group(1) @binding(3) var lacunarityTex  : texture_2d<f32>;
 @group(1) @binding(4) var speedTex       : texture_2d<f32>;
 @group(1) @binding(5) var sigSamp        : sampler;
-
-struct VSOut {
-    @builtin(position) pos : vec4<f32>,
-    @location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-    var pos = array<vec2<f32>, 4>(
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(1.0, -1.0)
-    );
-    var uv = array<vec2<f32>, 4>(
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(1.0, 0.0),
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 1.0)
-    );
-    return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 fn hash3(p: vec3<f32>) -> vec3<f32> {
     var p3 = fract(p * vec3<f32>(0.1031, 0.11369, 0.13787));
@@ -291,72 +282,13 @@ fn get_field(val: f32, hasSig: f32, tex: texture_2d<f32>, samp: sampler, uv: vec
 }
 `;
 
-interface DeviceNoiseResources {
-	uniformLayout: GPUBindGroupLayout;
-	signalsLayout: GPUBindGroupLayout;
-	pipelineCache: Map<string, GPURenderPipeline>;
-}
-
-const deviceResourceCache = new WeakMap<GPUDevice, DeviceNoiseResources>();
 const noiseUniformData = new Float32Array(24);
 
-function getDeviceLayouts(device: GPUDevice): DeviceNoiseResources {
-	let res = deviceResourceCache.get(device);
-	if (res) return res;
-
-	const uniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
-
-	const signalsLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 2,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 3,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 4,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 5,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-
-	res = {
-		uniformLayout,
-		signalsLayout,
-		pipelineCache: new Map(),
-	};
-	deviceResourceCache.set(device, res);
-	return res;
-}
+const getDeviceLayouts = perDevice((device) => ({
+	uniformLayout: fragmentBindGroupLayout(device, ["uniform"]),
+	signalsLayout: texturesLayout(device, 5),
+	pipelineCache: new Map<string, GPURenderPipeline>(),
+}));
 
 function getNoiseResources(device: GPUDevice, format: GPUTextureFormat) {
 	const layouts = getDeviceLayouts(device);
@@ -369,18 +301,11 @@ function getNoiseResources(device: GPUDevice, format: GPUTextureFormat) {
 			code: NOISE_SHADER,
 		});
 
-		pipeline = device.createRenderPipeline({
+		pipeline = createFullscreenPipeline(device, {
 			label: `NoiseGeneratorPipeline_${format}`,
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [layouts.uniformLayout, layouts.signalsLayout],
-			}),
-			vertex: { module: noiseModule, entryPoint: "vs" },
-			fragment: {
-				module: noiseModule,
-				entryPoint: "fs",
-				targets: [{ format }],
-			},
-			primitive: { topology: "triangle-strip" },
+			module: noiseModule,
+			layouts: [layouts.uniformLayout, layouts.signalsLayout],
+			format,
 		});
 		layouts.pipelineCache.set(cacheKey, pipeline);
 	}
@@ -410,39 +335,6 @@ function hexToRgba(hex: string): [number, number, number, number] {
 	return [r, g, b, a];
 }
 
-function resolveNoiseField(
-	op: NoiseOp,
-	fieldName: "scale" | "octaves" | "persistence" | "lacunarity" | "speed",
-	defaultValue: number,
-): { hasSignal: boolean; sd: any; value: number } {
-	const handleIdKey = `${fieldName}HandleId` as keyof NoiseOp;
-	const handleId = op[handleIdKey] as string | null | undefined;
-	const signalInput = handleId ? op.inputs?.[handleId] : null;
-
-	const hasSignal = !!(
-		signalInput?.connectionValid &&
-		(signalInput.outputItem?.type === "Signal" ||
-			signalInput.outputItem?.type === "Numeric")
-	);
-	const sd = hasSignal ? signalInput?.outputItem?.data : null;
-
-	let value = defaultValue;
-	if (!hasSignal) {
-		if (
-			signalInput?.connectionValid &&
-			signalInput.outputItem?.type === "Number"
-		) {
-			value = Number(signalInput.outputItem.data ?? defaultValue);
-		} else {
-			value = Number(op[fieldName] ?? defaultValue);
-		}
-	} else if (sd && typeof sd === "object" && "offset" in sd) {
-		value = Number(sd.offset ?? defaultValue);
-	}
-
-	return { hasSignal, sd, value };
-}
-
 export const NoiseWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const { ctx, encoder, pass, targetWidth, targetHeight, props } = args;
 
@@ -459,23 +351,25 @@ export const NoiseWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const fps = props.fps || 30;
 
 	// Resolve fields & check signals
-	const scaleInfo = resolveNoiseField(op, "scale", 10.0);
-	const octavesInfo = resolveNoiseField(op, "octaves", 4);
-	const persistenceInfo = resolveNoiseField(op, "persistence", 0.5);
-	const lacunarityInfo = resolveNoiseField(op, "lacunarity", 2.0);
-	const speedInfo = resolveNoiseField(op, "speed", 1.0);
+	const scaleInfo = resolveSignalField<NoiseSignalData>(op, "scale", 10.0);
+	const octavesInfo = resolveSignalField<NoiseSignalData>(op, "octaves", 4);
+	const persistenceInfo = resolveSignalField<NoiseSignalData>(
+		op,
+		"persistence",
+		0.5,
+	);
+	const lacunarityInfo = resolveSignalField<NoiseSignalData>(
+		op,
+		"lacunarity",
+		2.0,
+	);
+	const speedInfo = resolveSignalField<NoiseSignalData>(op, "speed", 1.0);
 
 	const noiseTypeVal =
 		op.noiseType === "Simplex" ? 1.0 : op.noiseType === "Voronoi" ? 2.0 : 0.0;
 	const outputTypeVal = op.outputType === "Video" ? 1.0 : 0.0;
 
-	const elapsedSeconds =
-		props.elapsedMs !== undefined ? props.elapsedMs / 1000 : frame / fps;
-	const durationSeconds = props.virtualMedia?.metadata?.durationMs
-		? props.virtualMedia.metadata.durationMs / 1000
-		: props.durationMs !== undefined
-			? props.durationMs / 1000
-			: 0;
+	const { elapsedSeconds, durationSeconds } = signalTiming(props, frame, fps);
 
 	const colorStartVal = hexToRgba(op.colorStart ?? "#000000");
 	const colorEndVal = hexToRgba(op.colorEnd ?? "#ffffff");
@@ -531,7 +425,7 @@ export const NoiseWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 			const view = signalRegistry.getOrCreate2DTextureView(
 				ctx.device,
 				encoder,
-				f.info.sd.nodeId ?? `noise_${f.name}_sig`,
+				f.info.sd?.nodeId ?? `noise_${f.name}_sig`,
 				elapsedSeconds,
 				durationSeconds,
 				f.info.sd as NoiseSignalData,

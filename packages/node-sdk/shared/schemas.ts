@@ -115,3 +115,18 @@ export const SignalResultSchema = SingleOutputGenericSchema(
 	createOutputItemSchema(z.literal("Signal"), z.unknown()),
 );
 export type SignalResult = z.infer<typeof SignalResultSchema>;
+
+/** The `inputs` map an operation carries: one entry per connected handle. */
+export const OperationInputsSchema = z.record(
+	z.string(),
+	z.object({
+		connectionValid: z.boolean(),
+		outputItem: z
+			.object({
+				type: z.string(),
+				data: z.unknown(),
+			})
+			.nullable()
+			.optional(),
+	}),
+);

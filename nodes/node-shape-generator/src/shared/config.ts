@@ -3,6 +3,7 @@ import {
 	configBuilder,
 	createOutputItemSchema,
 	MultiOutputGenericSchema,
+	OperationInputsSchema,
 	VirtualMediaDataSchema,
 } from "@framefields/node-sdk";
 import { z } from "zod";
@@ -208,21 +209,7 @@ export const ShapeGeneratorOperationSchema =
 		svgContent: z.string().optional(),
 		svgDataUrl: z.string().optional(),
 		metadata: z.record(z.string(), z.unknown()).optional(),
-		inputs: z
-			.record(
-				z.string(),
-				z.object({
-					connectionValid: z.boolean(),
-					outputItem: z
-						.object({
-							type: z.string(),
-							data: z.unknown(),
-						})
-						.nullable()
-						.optional(),
-				}),
-			)
-			.optional(),
+		inputs: OperationInputsSchema.optional(),
 	});
 export type ShapeGeneratorOperation = z.infer<
 	typeof ShapeGeneratorOperationSchema

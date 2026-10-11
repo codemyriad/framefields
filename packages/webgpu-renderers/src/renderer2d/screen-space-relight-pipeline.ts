@@ -7,6 +7,7 @@
 
 import { screenSpaceRelightWgsl } from "../shaders/screen-space-relight.js";
 import { BufferPool } from "./buffer-pool.js";
+import { PREMULTIPLIED_OVER } from "./pipeline-utils.js";
 
 export interface ScreenSpaceRelightExecuteOpts {
 	viewportWidth: number;
@@ -124,18 +125,7 @@ export class ScreenSpaceRelightPipeline {
 				targets: [
 					{
 						format,
-						blend: {
-							color: {
-								srcFactor: "one",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-							alpha: {
-								srcFactor: "one",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-						},
+						blend: PREMULTIPLIED_OVER,
 					},
 				],
 			},
@@ -155,10 +145,8 @@ export class ScreenSpaceRelightPipeline {
 			});
 			// Flat normal pointing along Z+: (0, 0, 1) -> encoded as (128, 128, 255, 255)
 			const flatNormals = new Uint8Array([
-				128, 128, 255, 255,
-				128, 128, 255, 255,
-				128, 128, 255, 255,
-				128, 128, 255, 255,
+				128, 128, 255, 255, 128, 128, 255, 255, 128, 128, 255, 255, 128, 128,
+				255, 255,
 			]);
 			this.device.queue.writeTexture(
 				{ texture: this.defaultFlatNormalTex },

@@ -85,6 +85,70 @@ function resolveSignalOperation(
 	return { ...virtualMedia, operation: resolved } as VirtualMediaData;
 }
 
+/** The paragraph props a text operation maps to, shared by both text paths. */
+function paragraphPropsFromTextOp(
+	// biome-ignore lint/suspicious/noExplicitAny: loosely typed operation payload
+	opText: any,
+	props: NodeRenderProps,
+	timing: {
+		containerWidth: number;
+		containerHeight: number;
+		frame: number;
+		fps: number;
+		durationMs: number | undefined;
+		elapsedMs: number | undefined;
+	},
+): Parameters<typeof drawParagraphNode>[2] {
+	return {
+		text: opText.text || "",
+		dstRect: {
+			x: Number(opText.x ?? 0),
+			y: Number(opText.y ?? 0),
+			width: Number(opText.width ?? timing.containerWidth),
+			height: Number(opText.height ?? timing.containerHeight),
+		},
+		fontFamily: opText.fontFamily,
+		fontSize: Number(opText.fontSize ?? 48),
+		color: opText.fill ?? opText.color ?? "white",
+		width: opText.width ? Number(opText.width) : undefined,
+		height: opText.height ? Number(opText.height) : undefined,
+		lineHeight: Number(opText.lineHeight ?? 1.2),
+		align: opText.align,
+		verticalAlign: opText.verticalAlign,
+		fontWeight: opText.fontWeight,
+		fontStyle: opText.fontStyle,
+		letterSpacing: opText.letterSpacing,
+		shadows: opText.shadows,
+		textBackgroundColor: opText.textBackgroundColor,
+		padding: opText.padding != null ? Number(opText.padding) : undefined,
+		stroke: opText.stroke,
+		strokeWidth:
+			(opText.strokeWidth ?? opText.strokeThickness)
+				? Number(opText.strokeWidth ?? opText.strokeThickness)
+				: undefined,
+		strokeAlign: opText.strokeAlign,
+		opacity: Number(opText.opacity ?? 1) * Number(props.opacity ?? 1),
+		isHeadless: props.isHeadless,
+		animation: opText.animation ?? opText.textAnimation,
+		animators: opText.animators,
+		pathOptions: opText.pathOptions,
+		typewriter: opText.typewriter,
+		marquee: opText.marquee,
+		signals: props.signals ?? opText.signals,
+		firstMargin:
+			opText.firstMargin != null ? Number(opText.firstMargin) : undefined,
+		lastMargin:
+			opText.lastMargin != null ? Number(opText.lastMargin) : undefined,
+		baselineShift:
+			opText.baselineShift != null ? Number(opText.baselineShift) : undefined,
+		frame: timing.frame,
+		fps: timing.fps,
+		durationMs: timing.durationMs,
+		elapsedMs: timing.elapsedMs,
+		isVideoMode: props.isVideoMode,
+	};
+}
+
 export async function drawCompositionTree(
 	ctx: RenderContextValue,
 	encoder: GPUCommandEncoder,
@@ -461,65 +525,22 @@ export async function drawCompositionTree(
 				} else if (mediaType === "Text") {
 					const opText = { ...op } as any;
 					drawParagraphNode(ctx, pass, {
-						text: opText.text || "",
-						dstRect: {
-							x: Number(opText.x ?? 0),
-							y: Number(opText.y ?? 0),
-							width: Number(opText.width ?? containerWidth),
-							height: Number(opText.height ?? containerHeight),
-						},
-						fontFamily: opText.fontFamily,
-						fontSize: Number(opText.fontSize ?? 48),
-						color: opText.fill ?? opText.color ?? "white",
-						width: opText.width ? Number(opText.width) : undefined,
-						height: opText.height ? Number(opText.height) : undefined,
-						lineHeight: Number(opText.lineHeight ?? 1.2),
-						align: opText.align,
-						verticalAlign: opText.verticalAlign,
-						fontWeight: opText.fontWeight,
-						fontStyle: opText.fontStyle,
-						letterSpacing: opText.letterSpacing,
-						shadows: opText.shadows,
-						textBackgroundColor: opText.textBackgroundColor,
+						...paragraphPropsFromTextOp(opText, props, {
+							containerWidth,
+							containerHeight,
+							frame: localFrame,
+							fps,
+							durationMs: resolvedDurationMs,
+							elapsedMs: resolvedElapsedMs,
+						}),
 						borderRadius:
 							opText.borderRadius != null
 								? Number(opText.borderRadius)
 								: undefined,
-						padding:
-							opText.padding != null ? Number(opText.padding) : undefined,
-						stroke: opText.stroke,
-						strokeWidth:
-							(opText.strokeWidth ?? opText.strokeThickness)
-								? Number(opText.strokeWidth ?? opText.strokeThickness)
-								: undefined,
-						strokeAlign: opText.strokeAlign,
-						opacity: Number(opText.opacity ?? 1) * Number(props.opacity ?? 1),
-						isHeadless: props.isHeadless,
-						animation: opText.animation ?? opText.textAnimation,
-						animators: opText.animators,
-						pathOptions: opText.pathOptions,
-						typewriter: opText.typewriter,
-						marquee: opText.marquee,
 						textProgress:
 							opText.textProgress != null
 								? Number(opText.textProgress)
 								: undefined,
-						signals: props.signals ?? opText.signals,
-						firstMargin:
-							opText.firstMargin != null
-								? Number(opText.firstMargin)
-								: undefined,
-						lastMargin:
-							opText.lastMargin != null ? Number(opText.lastMargin) : undefined,
-						baselineShift:
-							opText.baselineShift != null
-								? Number(opText.baselineShift)
-								: undefined,
-						frame: localFrame,
-						fps,
-						durationMs: resolvedDurationMs,
-						elapsedMs: resolvedElapsedMs,
-						isVideoMode: props.isVideoMode,
 					});
 				} else if (mediaType === "Video") {
 					const finalPlaybackRate = Math.max(
@@ -611,28 +632,16 @@ export async function drawCompositionTree(
 			const containerWidth = props.containerWidth ?? ctx.surface.width;
 			const containerHeight = props.containerHeight ?? ctx.surface.height;
 			drawParagraphNode(ctx, pass, {
+				...paragraphPropsFromTextOp(opText, props, {
+					containerWidth,
+					containerHeight,
+					frame: localFrame,
+					fps,
+					durationMs: resolvedDurationMs,
+					elapsedMs: resolvedElapsedMs,
+				}),
 				renderId: props.renderId,
-				text: opText.text || "",
-				dstRect: {
-					x: Number(opText.x ?? 0),
-					y: Number(opText.y ?? 0),
-					width: Number(opText.width ?? containerWidth),
-					height: Number(opText.height ?? containerHeight),
-				},
 				spans: opText.spans,
-				fontFamily: opText.fontFamily,
-				fontSize: Number(opText.fontSize ?? 48),
-				color: opText.fill ?? opText.color ?? "white",
-				width: opText.width ? Number(opText.width) : undefined,
-				height: opText.height ? Number(opText.height) : undefined,
-				lineHeight: Number(opText.lineHeight ?? 1.2),
-				align: opText.align,
-				verticalAlign: opText.verticalAlign,
-				fontWeight: opText.fontWeight,
-				fontStyle: opText.fontStyle,
-				letterSpacing: opText.letterSpacing,
-				shadows: opText.shadows,
-				textBackgroundColor: opText.textBackgroundColor,
 				borderRadius:
 					(opText.borderRadius ?? opText.strokeRadius) != null
 						? Number(opText.borderRadius ?? opText.strokeRadius)
@@ -641,34 +650,6 @@ export async function drawCompositionTree(
 					(opText.strokeRadius ?? opText.borderRadius) != null
 						? Number(opText.strokeRadius ?? opText.borderRadius)
 						: undefined,
-				padding: opText.padding != null ? Number(opText.padding) : undefined,
-				stroke: opText.stroke,
-				strokeWidth:
-					(opText.strokeWidth ?? opText.strokeThickness)
-						? Number(opText.strokeWidth ?? opText.strokeThickness)
-						: undefined,
-				strokeAlign: opText.strokeAlign,
-				opacity: Number(opText.opacity ?? 1) * Number(props.opacity ?? 1),
-				isHeadless: props.isHeadless,
-				animation: opText.animation ?? opText.textAnimation,
-				animators: opText.animators,
-				pathOptions: opText.pathOptions,
-				typewriter: opText.typewriter,
-				marquee: opText.marquee,
-				signals: props.signals ?? opText.signals,
-				firstMargin:
-					opText.firstMargin != null ? Number(opText.firstMargin) : undefined,
-				lastMargin:
-					opText.lastMargin != null ? Number(opText.lastMargin) : undefined,
-				baselineShift:
-					opText.baselineShift != null
-						? Number(opText.baselineShift)
-						: undefined,
-				frame: localFrame,
-				fps,
-				durationMs: resolvedDurationMs,
-				elapsedMs: resolvedElapsedMs,
-				isVideoMode: props.isVideoMode,
 			});
 		}
 

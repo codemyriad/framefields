@@ -1,5 +1,6 @@
 import {
 	type AudioProcessor,
+	isHandleConnected,
 	resolveNumber,
 	resolveString,
 } from "@framefields/node-sdk";
@@ -221,11 +222,6 @@ export const parametricEqAudioProcessor: AudioProcessor = async (
 	}
 
 	const op = (virtualMedia.operation as Record<string, unknown>) || {};
-	const inputs =
-		(op.inputs as Record<
-			string,
-			{ connectionValid?: boolean; outputItem?: { type?: string } }
-		>) || {};
 
 	const rawType = resolveString(op.type, "peak");
 	const config: ParametricEqNodeConfig = {
@@ -248,21 +244,11 @@ export const parametricEqAudioProcessor: AudioProcessor = async (
 		qHandleId: typeof op.qHandleId === "string" ? op.qHandleId : null,
 	};
 
-	const isHandleConnected = (handleIdKey: string): boolean => {
-		const handleId = op[handleIdKey];
-		if (typeof handleId !== "string" || !handleId) return false;
-		const input = inputs[handleId];
-		return Boolean(
-			input?.connectionValid &&
-				input.outputItem &&
-				(input.outputItem.type === "Signal" ||
-					input.outputItem.type === "Number"),
-		);
-	};
-
-	const hasFrequencySig = isHandleConnected("frequencyHandleId") ? 1.0 : 0.0;
-	const hasGainSig = isHandleConnected("gainHandleId") ? 1.0 : 0.0;
-	const hasQSig = isHandleConnected("qHandleId") ? 1.0 : 0.0;
+	const hasFrequencySig = isHandleConnected(op, "frequencyHandleId")
+		? 1.0
+		: 0.0;
+	const hasGainSig = isHandleConnected(op, "gainHandleId") ? 1.0 : 0.0;
+	const hasQSig = isHandleConnected(op, "qHandleId") ? 1.0 : 0.0;
 
 	const numChannels = channels.length;
 	if (numChannels === 0) return;

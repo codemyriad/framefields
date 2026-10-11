@@ -1,5 +1,15 @@
 /// <reference types="webgpu" />
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	drawChildToTexture,
+	drawFullscreenPass,
+	drawTextureToTarget,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+	perDevice,
+	signalTiming,
+} from "@framefields/node-sdk/gpu";
 import { lutStore, signalRegistry } from "@framefields/webgpu-renderers";
 
 export const LUT_3D_SHADER = `
@@ -17,27 +27,7 @@ struct LutUniforms {
 @group(2) @binding(1) var lutSamp    : sampler;
 @group(3) @binding(0) var signalTex  : texture_2d<f32>;
 @group(3) @binding(1) var signalSamp : sampler;
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
 	let inputColor = textureSampleLevel(tex, samp, in.uv, 0.0);
@@ -71,27 +61,7 @@ struct LutUniforms {
 @group(2) @binding(1) var lutSamp    : sampler;
 @group(3) @binding(0) var signalTex  : texture_2d<f32>;
 @group(3) @binding(1) var signalSamp : sampler;
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
 	let inputColor = textureSampleLevel(tex, samp, in.uv, 0.0);
@@ -114,99 +84,22 @@ struct VSOut {
 }
 `;
 
-interface DeviceLutLayouts {
-	lutUniformLayout: GPUBindGroupLayout;
-	singleTextureLayout: GPUBindGroupLayout;
-	lutTextureLayout3D: GPUBindGroupLayout;
-	lutTextureLayout1D: GPUBindGroupLayout;
-	signalTextureLayout: GPUBindGroupLayout;
-	pipelineCache: Map<string, GPURenderPipeline>;
-}
-
-const deviceResourceCache = new WeakMap<GPUDevice, DeviceLutLayouts>();
 const lutUniformData = new Float32Array(4);
 
-function getDeviceLayouts(device: GPUDevice): DeviceLutLayouts {
-	let res = deviceResourceCache.get(device);
-	if (res) return res;
-
-	const lutUniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
-	const singleTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-	const lutTextureLayout3D = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { viewDimension: "3d", sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-	const lutTextureLayout1D = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { viewDimension: "1d", sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-	const signalTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-
-	res = {
-		lutUniformLayout,
-		singleTextureLayout,
-		lutTextureLayout3D,
-		lutTextureLayout1D,
-		signalTextureLayout,
-		pipelineCache: new Map(),
-	};
-	deviceResourceCache.set(device, res);
-	return res;
-}
+const getDeviceLayouts = perDevice((device) => ({
+	lutUniformLayout: fragmentBindGroupLayout(device, ["uniform"]),
+	singleTextureLayout: fragmentBindGroupLayout(device, ["texture", "sampler"]),
+	lutTextureLayout3D: fragmentBindGroupLayout(device, [
+		{ texture: { viewDimension: "3d", sampleType: "float" } },
+		"sampler",
+	]),
+	lutTextureLayout1D: fragmentBindGroupLayout(device, [
+		{ texture: { viewDimension: "1d", sampleType: "float" } },
+		"sampler",
+	]),
+	signalTextureLayout: fragmentBindGroupLayout(device, ["texture", "sampler"]),
+	pipelineCache: new Map<string, GPURenderPipeline>(),
+}));
 
 function getLutResources(
 	device: GPUDevice,
@@ -224,23 +117,16 @@ function getLutResources(
 		});
 		const currentLutLayout =
 			type === "3D" ? layouts.lutTextureLayout3D : layouts.lutTextureLayout1D;
-		pipeline = device.createRenderPipeline({
+		pipeline = createFullscreenPipeline(device, {
 			label: `LutPipeline_${type}_${format}`,
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [
-					layouts.lutUniformLayout,
-					layouts.singleTextureLayout,
-					currentLutLayout,
-					layouts.signalTextureLayout,
-				],
-			}),
-			vertex: { module: lutModule, entryPoint: "vs" },
-			fragment: {
-				module: lutModule,
-				entryPoint: "fs",
-				targets: [{ format }],
-			},
-			primitive: { topology: "triangle-strip" },
+			module: lutModule,
+			layouts: [
+				layouts.lutUniformLayout,
+				layouts.singleTextureLayout,
+				currentLutLayout,
+				layouts.signalTextureLayout,
+			],
+			format,
 		});
 		layouts.pipelineCache.set(cacheKey, pipeline);
 	}
@@ -260,12 +146,10 @@ export const LutWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		ctx,
 		encoder,
 		pass,
-		targetView,
 		targetTexture,
 		targetWidth,
 		targetHeight,
 		props,
-		drawChild,
 	} = args;
 	const frame = props.frame ?? 0;
 	const fps = props.fps || 30;
@@ -360,55 +244,11 @@ export const LutWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		}
 	}
 
-	const tmpTex = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const tmpView = tmpTex.createView();
-
-	// Clear temporary texture
-	const childPass = ctx.renderer.beginFrame(
-		encoder,
-		tmpView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	childPass.end();
-
-	// Draw child frame into tmpTex
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		childMedia,
-		{ ...props, virtualMedia: childMedia },
-		tmpView,
-		tmpTex,
-		width,
-		height,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	const { texture: tmpTex } = await drawChildToTexture(args, childMedia);
 
 	// If no LUT is ready (and no fallback is available), draw the child frame directly as a passthrough
 	if (!lut) {
-		const finalPass = ctx.renderer.beginFrame(
-			encoder,
-			targetView,
-			{ r: 0, g: 0, b: 0, a: 0 },
-			targetWidth,
-			targetHeight,
-			"load",
-		);
-
-		ctx.renderer.drawTexture(
-			finalPass,
-			tmpTex,
-			{ x: 0, y: 0, width: targetWidth, height: targetHeight },
-			{ opacity: op.opacity ?? 1 },
-		);
-		args.pass = finalPass;
+		drawTextureToTarget(args, tmpTex, op.opacity ?? 1);
 		return;
 	}
 
@@ -433,13 +273,7 @@ export const LutWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	// Fetch dynamic intensity signal texture view
 	let signalView: GPUTextureView;
 	if (hasStaticSignal) {
-		const elapsedSeconds =
-			props.elapsedMs !== undefined ? props.elapsedMs / 1000 : frame / fps;
-		const durationSeconds = props.virtualMedia?.metadata?.durationMs
-			? props.virtualMedia.metadata.durationMs / 1000
-			: props.durationMs !== undefined
-				? props.durationMs / 1000
-				: 0;
+		const { elapsedSeconds, durationSeconds } = signalTiming(props, frame, fps);
 		signalView = signalRegistry.getOrCreate2DTextureView(
 			ctx.device,
 			encoder,
@@ -465,36 +299,17 @@ export const LutWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 
 	const uniformBuffer = ctx.renderer.getTemporaryBuffer(lutUniformData);
 
-	const renderPass = encoder.beginRenderPass({
-		colorAttachments: [
-			{
-				view: outTex.createView(),
-				loadOp: "clear",
-				storeOp: "store",
-				clearValue: { r: 0, g: 0, b: 0, a: 0 },
-			},
-		],
-	});
-
-	renderPass.setPipeline(pipeline!);
-	renderPass.setBindGroup(
-		0,
+	drawFullscreenPass(encoder, outTex.createView(), pipeline!, [
 		ctx.device.createBindGroup({
 			layout: uLayout!,
 			entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
 		}),
-	);
-	renderPass.setBindGroup(
-		1,
 		ctx.renderer.bindGroupCache.getBindGroup(
 			ctx.device,
 			tLayout!,
 			tmpTex,
 			sampler,
 		),
-	);
-	renderPass.setBindGroup(
-		2,
 		ctx.device.createBindGroup({
 			layout: lLayout!,
 			entries: [
@@ -502,9 +317,6 @@ export const LutWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 				{ binding: 1, resource: sampler },
 			],
 		}),
-	);
-	renderPass.setBindGroup(
-		3,
 		ctx.device.createBindGroup({
 			layout: sigLayout!,
 			entries: [
@@ -512,25 +324,8 @@ export const LutWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 				{ binding: 1, resource: sampler },
 			],
 		}),
-	);
-	renderPass.draw(4);
-	renderPass.end();
+	]);
 
 	// Blending/opacity draw to the targetView
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		targetWidth,
-		targetHeight,
-		"load",
-	);
-
-	ctx.renderer.drawTexture(
-		finalPass,
-		outTex,
-		{ x: 0, y: 0, width: targetWidth, height: targetHeight },
-		{ opacity: op.opacity ?? 1 },
-	);
-	args.pass = finalPass;
+	drawTextureToTarget(args, outTex, op.opacity ?? 1);
 };

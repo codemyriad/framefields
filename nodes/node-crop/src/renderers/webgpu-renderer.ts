@@ -1,4 +1,8 @@
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	drawChildToTexture,
+	FULLSCREEN_QUAD_WGSL,
+} from "@framefields/node-sdk/gpu";
 
 const maskWgsl = `
 struct MaskUniforms {
@@ -11,27 +15,7 @@ struct MaskUniforms {
 };
 
 @group(0) @binding(0) var<uniform> u : MaskUniforms;
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 fn sdRoundedRect(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
 	let q = abs(p) - b + r;
@@ -92,7 +76,6 @@ export const CropWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const {
 		ctx,
 		props,
-		drawChild,
 		targetTexture,
 		targetView,
 		targetWidth,
@@ -163,45 +146,15 @@ export const CropWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	args.pass.end();
 
 	// 1. Render child into a temporary offscreen texture at its native size
-	const childTex = ctx.renderer.getTemporaryTexture(sourceWidth, sourceHeight, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const childView = childTex.createView();
-
-	const clearPass = ctx.renderer.beginFrame(
-		encoder,
-		childView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		sourceWidth,
-		sourceHeight,
-		"clear",
-	);
-	clearPass.end();
-
-	ctx.renderer.pushScissor({
-		x: 0,
-		y: 0,
+	const { texture: childTex } = await drawChildToTexture(args, childMedia, {
 		width: sourceWidth,
 		height: sourceHeight,
-	});
-	ctx.renderer.pushIdentity();
-
-	await drawChild(
-		childMedia,
-		{
+		props: {
 			...props,
 			containerWidth: sourceWidth,
 			containerHeight: sourceHeight,
 		},
-		childView,
-		childTex,
-		sourceWidth,
-		sourceHeight,
-	);
-
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	});
 
 	// Determine if we need complex masking (roundness/path)
 	const needsComplexMask = roundness > 0 || isPath || isRest;

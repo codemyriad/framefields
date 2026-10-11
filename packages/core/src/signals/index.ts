@@ -487,8 +487,9 @@ export interface SineSignalOptions {
 	phase?: number;
 }
 
-export function sineSignal(
-	options: SineSignalOptions = {},
+function periodicSignal(
+	wave: (angle: number) => number,
+	options: SineSignalOptions,
 ): FrameSignal<number> {
 	const min = options.min;
 	const max = options.max;
@@ -518,45 +519,21 @@ export function sineSignal(
 				const freq = frequency ?? 1.0;
 				angle = 2 * Math.PI * freq * ctx.time + phase;
 			}
-			return offset + amplitude * Math.sin(angle);
+			return offset + amplitude * wave(angle);
 		},
 	});
+}
+
+export function sineSignal(
+	options: SineSignalOptions = {},
+): FrameSignal<number> {
+	return periodicSignal(Math.sin, options);
 }
 
 export function cosineSignal(
 	options: SineSignalOptions = {},
 ): FrameSignal<number> {
-	const min = options.min;
-	const max = options.max;
-	let amplitude = options.amplitude ?? 1.0;
-	let offset = options.offset ?? 0.0;
-
-	if (min !== undefined && max !== undefined) {
-		offset = (min + max) / 2;
-		amplitude = (max - min) / 2;
-	} else if (min !== undefined) {
-		offset = min + amplitude;
-	} else if (max !== undefined) {
-		offset = max - amplitude;
-	}
-
-	const period = options.period;
-	const frequency = options.frequency;
-	const phase = options.phase ?? 0.0;
-
-	return signalBuilder({
-		type: "custom",
-		fn: (ctx: FrameContext) => {
-			let angle: number;
-			if (period !== undefined && period > 0) {
-				angle = (2 * Math.PI * ctx.frame) / period + phase;
-			} else {
-				const freq = frequency ?? 1.0;
-				angle = 2 * Math.PI * freq * ctx.time + phase;
-			}
-			return offset + amplitude * Math.cos(angle);
-		},
-	});
+	return periodicSignal(Math.cos, options);
 }
 
 export {

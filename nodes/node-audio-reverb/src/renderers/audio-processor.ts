@@ -1,4 +1,8 @@
-import { type AudioProcessor, resolveNumber } from "@framefields/node-sdk";
+import {
+	type AudioProcessor,
+	isHandleConnected,
+	resolveNumber,
+} from "@framefields/node-sdk";
 import { WebGPUAudioProcessor } from "@framefields/webgpu-renderers";
 
 const PARAM_ORDER = ["roomSize", "damping", "wet", "dry", "width"];
@@ -289,11 +293,6 @@ export const reverbAudioProcessor: AudioProcessor = async (
 	}
 
 	const op = (virtualMedia.operation as Record<string, unknown>) || {};
-	const inputs =
-		(op.inputs as Record<
-			string,
-			{ connectionValid?: boolean; outputItem?: { type?: string } }
-		>) || {};
 
 	const numChannels = channels.length;
 	if (numChannels === 0) return;
@@ -316,23 +315,11 @@ export const reverbAudioProcessor: AudioProcessor = async (
 		Math.min(resolveNumber(op.width, 1.0), 1.0),
 	);
 
-	const isHandleConnected = (handleIdKey: string): boolean => {
-		const handleId = op[handleIdKey];
-		if (typeof handleId !== "string" || !handleId) return false;
-		const input = inputs[handleId];
-		return Boolean(
-			input?.connectionValid &&
-				input.outputItem &&
-				(input.outputItem.type === "Signal" ||
-					input.outputItem.type === "Number"),
-		);
-	};
-
-	const hasRoomSizeSig = isHandleConnected("roomSizeHandleId") ? 1.0 : 0.0;
-	const hasDampingSig = isHandleConnected("dampingHandleId") ? 1.0 : 0.0;
-	const hasWetSig = isHandleConnected("wetHandleId") ? 1.0 : 0.0;
-	const hasDrySig = isHandleConnected("dryHandleId") ? 1.0 : 0.0;
-	const hasWidthSig = isHandleConnected("widthHandleId") ? 1.0 : 0.0;
+	const hasRoomSizeSig = isHandleConnected(op, "roomSizeHandleId") ? 1.0 : 0.0;
+	const hasDampingSig = isHandleConnected(op, "dampingHandleId") ? 1.0 : 0.0;
+	const hasWetSig = isHandleConnected(op, "wetHandleId") ? 1.0 : 0.0;
+	const hasDrySig = isHandleConnected(op, "dryHandleId") ? 1.0 : 0.0;
+	const hasWidthSig = isHandleConnected(op, "widthHandleId") ? 1.0 : 0.0;
 
 	const scale = sampleRate / 44100;
 

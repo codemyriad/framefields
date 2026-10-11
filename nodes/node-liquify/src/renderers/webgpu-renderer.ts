@@ -1,5 +1,13 @@
 /// <reference types="webgpu" />
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	beginTargetPass,
+	createFullscreenPipeline,
+	drawChildToTexture,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+	STRAIGHT_ALPHA_BLEND,
+} from "@framefields/node-sdk/gpu";
 import type { LiquifyDeformOperation } from "../shared/config.js";
 
 const MAX_OPERATIONS = 1024;
@@ -33,27 +41,7 @@ struct LiquifyUniforms {
 @group(0) @binding(0) var<uniform> u : LiquifyUniforms;
 @group(1) @binding(0) var tex        : texture_2d<f32>;
 @group(1) @binding(1) var samp       : sampler;
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 const PI = 3.141592653589793;
 
@@ -125,32 +113,17 @@ const deviceResourceCache = new WeakMap<GPUDevice, DeviceLiquifyResources>();
 function getLiquifyResources(device: GPUDevice, format: GPUTextureFormat) {
 	let layouts = deviceResourceCache.get(device);
 	if (!layouts) {
-		const uniformLayout = device.createBindGroupLayout({
-			label: "LiquifyUniformLayout",
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.FRAGMENT,
-					buffer: { type: "uniform" },
-				},
-			],
-		});
+		const uniformLayout = fragmentBindGroupLayout(
+			device,
+			["uniform"],
+			"LiquifyUniformLayout",
+		);
 
-		const singleTextureLayout = device.createBindGroupLayout({
-			label: "LiquifyTextureLayout",
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.FRAGMENT,
-					texture: { sampleType: "float" },
-				},
-				{
-					binding: 1,
-					visibility: GPUShaderStage.FRAGMENT,
-					sampler: { type: "filtering" },
-				},
-			],
-		});
+		const singleTextureLayout = fragmentBindGroupLayout(
+			device,
+			["texture", "sampler"],
+			"LiquifyTextureLayout",
+		);
 
 		layouts = {
 			uniformLayout,
@@ -168,34 +141,12 @@ function getLiquifyResources(device: GPUDevice, format: GPUTextureFormat) {
 			code: LIQUIFY_SHADER,
 		});
 
-		pipeline = device.createRenderPipeline({
+		pipeline = createFullscreenPipeline(device, {
 			label: `LiquifyPipeline_${format}`,
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [layouts.uniformLayout, layouts.singleTextureLayout],
-			}),
-			vertex: { module, entryPoint: "vs" },
-			fragment: {
-				module,
-				entryPoint: "fs",
-				targets: [
-					{
-						format,
-						blend: {
-							color: {
-								srcFactor: "src-alpha",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-							alpha: {
-								srcFactor: "one",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-						},
-					},
-				],
-			},
-			primitive: { topology: "triangle-strip" },
+			module,
+			layouts: [layouts.uniformLayout, layouts.singleTextureLayout],
+			format,
+			blend: STRAIGHT_ALPHA_BLEND,
 		});
 		layouts.pipelineCache.set(cacheKey, pipeline);
 	}
@@ -217,17 +168,7 @@ const TYPE_ENUM_MAP: Record<string, number> = {
 };
 
 export const LiquifyWebGPURenderer: WebGPUNodeRenderer = async (args) => {
-	const {
-		ctx,
-		encoder,
-		pass,
-		targetView,
-		targetTexture,
-		targetWidth,
-		targetHeight,
-		props,
-		drawChild,
-	} = args;
+	const { ctx, pass, targetWidth, targetHeight, props } = args;
 
 	const op = props.virtualMedia?.operation as LiquifyOp | undefined;
 	if (op?.op !== "Liquify" || !op) return;
@@ -243,40 +184,14 @@ export const LiquifyWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const aspectRatio = height > 0 ? width / height : 1.0;
 
 	// 1. Render child media into intermediate texture
-	const childTexture = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const childView = childTexture.createView();
-
-	const childPass = ctx.renderer.beginFrame(
-		encoder,
-		childView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	childPass.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		childMedia,
-		{
+	const { texture: childTexture } = await drawChildToTexture(args, childMedia, {
+		props: {
 			...props,
 			virtualMedia: childMedia,
 			containerWidth: width,
 			containerHeight: height,
-			excludeTextures: [...(props.excludeTextures || []), childTexture],
 		},
-		childView,
-		childTexture,
-		width,
-		height,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	});
 
 	// 2. Prepare Uniform Buffer
 	const operations = op.operations || [];
@@ -321,21 +236,12 @@ export const LiquifyWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	);
 
 	// 3. Render final pass to targetView
-	const outPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"load",
-	);
+	const outPass = beginTargetPass(args);
 
 	outPass.setPipeline(resources.liquifyPipeline);
 	outPass.setBindGroup(0, uniformBindGroup);
 	outPass.setBindGroup(1, textureBindGroup);
 	outPass.draw(4, 1, 0, 0);
-
-	args.pass = outPass;
 };
 
 export default LiquifyWebGPURenderer;

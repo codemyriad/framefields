@@ -1,5 +1,26 @@
 import { ALL_FORMATS, FilePathSource, Input, UrlSource } from "mediabunny";
 
+const isNodeRuntime = () =>
+	typeof process !== "undefined" && Boolean(process.versions?.node);
+
+/** In the browser, local paths are served through the dev server's `/@fs`. */
+function resolveInputUrl(url: string, isNode: boolean): string {
+	let resolvedUrl = url;
+	if (!isNode && typeof window !== "undefined") {
+		if (resolvedUrl.startsWith("file://")) {
+			resolvedUrl = resolvedUrl.slice(7);
+		}
+		if (
+			resolvedUrl.startsWith("/") &&
+			!resolvedUrl.startsWith("/@fs/") &&
+			!resolvedUrl.startsWith("/api/")
+		) {
+			resolvedUrl = "/@fs" + resolvedUrl;
+		}
+	}
+	return resolvedUrl;
+}
+
 class InputStore {
 	private store = new Map<
 		string,
@@ -8,21 +29,8 @@ class InputStore {
 
 	async acquire(url: string): Promise<Input> {
 		if (!url) throw new Error("Cannot acquire Input for empty URL");
-		let resolvedUrl = url;
-		const isNode = typeof process !== "undefined" && Boolean(process.versions?.node);
-
-		if (!isNode && typeof window !== "undefined") {
-			if (resolvedUrl.startsWith("file://")) {
-				resolvedUrl = resolvedUrl.slice(7);
-			}
-			if (
-				resolvedUrl.startsWith("/") &&
-				!resolvedUrl.startsWith("/@fs/") &&
-				!resolvedUrl.startsWith("/api/")
-			) {
-				resolvedUrl = "/@fs" + resolvedUrl;
-			}
-		}
+		const isNode = isNodeRuntime();
+		const resolvedUrl = resolveInputUrl(url, isNode);
 
 		let shared = this.store.get(resolvedUrl);
 		if (!shared) {
@@ -57,21 +65,7 @@ class InputStore {
 
 	release(url: string): void {
 		if (!url) return;
-		let resolvedUrl = url;
-		const isNode = typeof process !== "undefined" && Boolean(process.versions?.node);
-
-		if (!isNode && typeof window !== "undefined") {
-			if (resolvedUrl.startsWith("file://")) {
-				resolvedUrl = resolvedUrl.slice(7);
-			}
-			if (
-				resolvedUrl.startsWith("/") &&
-				!resolvedUrl.startsWith("/@fs/") &&
-				!resolvedUrl.startsWith("/api/")
-			) {
-				resolvedUrl = "/@fs" + resolvedUrl;
-			}
-		}
+		const resolvedUrl = resolveInputUrl(url, isNodeRuntime());
 		const shared = this.store.get(resolvedUrl);
 		if (!shared) return;
 
