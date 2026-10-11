@@ -112,7 +112,7 @@ Modern automated video generation is usually constrained by the architectures of
 | 🎯 | **Deterministic Frame-Accurate Clock** | Absolute frame clocks, discrete sample points, and frame-accurate audio BeatGrids. No floating timers, no drift, no dropped frames. |
 | 🔠 | **Analytic, Resolution-Independent Type** | The Slug algorithm evaluates glyph contours per-pixel in WGSL — no texture atlases, no scaling artifacts, razor-sharp from 10 px to 10,000 px. |
 | 🎨 | **Photoshop-Inspired Tonal & Spatial VFX** | 50+ modular GPU shaders: Curves, Levels, Selective Color, 3D LUTs, Halftone, Film Grain, Unsharp Mask, Mesh Warp, and Screen-Space Relighting. |
-| 🧊 | **Unified 3D & 2D Depth Compositing** | Nest 2D flex/box trees inside 3D homography planes, multiplane rigs, and meshes (OBJ, FBX, glTF/GLB, STL, PLY, VOX, 3DS, OFF), with PBR glass and SSAO. |
+| 🧊 | **Unified 3D & 2D Depth Compositing** | Nest 2D flex/box trees inside 3D homography planes, multiplane rigs, and meshes (OBJ, FBX, glTF/GLB, STL, PLY, VOX, 3DS, OFF), with GGX PBR, image-based light, shadows, bloom and SSAO. |
 | 🔊 | **Built-in Procedural Audio DSP** | Multi-track soundtracks, deterministic procedural transition SFX (whoosh, impact, riser), and reactive signals that drive visuals from audio. |
 | 👁️ | **On-Device Neural Vision** | Object tracking, instance segmentation, multi-person pose, and person mattes from Apache-2.0 ONNX models — feeding reactive signals without a round trip to disk. |
 | ☁️ | **Cloud-Native & CI/CD Ready** | ~200–400 MB RAM per worker (vs. 2–4 GB for Chromium), ideal for serverless GPU render clusters (AWS G4/G5, Modal, RunPod, Kubernetes). |
@@ -135,12 +135,15 @@ A comprehensive suite of professional image/video shader nodes in [`nodes/`](nod
 - **Stylization & grain** — Film Grain (Gaussian emulsion with spatial seed variation), Halftone (mono/RGB/CMYK, adjustable dot shape & angle), Gradient Map, High Pass.
 - **Optics & lens** — Bilateral Gaussian Blur, Unsharp Mask, Vignette, Refraction Caustics, PBR Glassmorphism with chromatic dispersion ([`PBRGlass`](packages/framefields/src/effects)).
 - **Distortion & warping** — Displacement Maps, Liquify, Mesh Warp, Corner Pin homography.
+- **Gradients, mattes & transitions** — CSS `linear-` / `radial-` / `conic-gradient()` strings as any background or fill (blended in OKLab), track mattes (`node.withMatte(layer, "alpha" | "luma" …)`) for wipes, reveals and video-in-type, and [`Layer.sequence`](packages/framefields/src/transitions.ts) with `Transition.push` / `wipe` / `iris` / `crossfade` / `zoom` / `whip` between scenes.
 
 ### 3. Unified 3D Scene Graph, Camera & Mesh Shading
 - **Calibrated camera rig** — LookAt and Turntable cameras ([`Camera3D`](packages/webgpu-renderers/src/math3d/camera3d.ts)) calibrated so `z = 0` matches 2D canvas pixel coordinates 1:1.
 - **3D layout primitives** — [`Layer3D.cube`](packages/framefields/src/shapes3d.ts), `carousel`, `prism`, `plane`, `grid` with unified depth-buffer testing, plus solid smooth-shaded meshes: `roundedBox` (with `taper`, for keycaps and device bodies), `sphere` and `cylinder`.
 - **Zero-dependency model parsers** — OBJ, FBX, glTF/GLB, STL, PLY, VOX, 3DS, OFF.
-- **Skeletal animation & shading** — 128-bone Linear Blend Skinning, Blinn-Phong & PBR multi-light shading, PCSS/Poisson contact shadows, SSAO, and optical DoF.
+- **Physically based look** — add [`Layer.environment("studio")`](packages/webgpu-renderers/src/math3d/environment3d.ts) and the scene shades in linear light with GGX `roughness` / `metallic`, a procedural studio environment for image-based light and reflections, `emissive` surfaces, exposure, and Khronos PBR Neutral / AgX / ACES tone mapping. Scenes without one keep the classic Blinn-Phong look.
+- **Shadows, bloom & fog** — soft PCF shadow maps from a `castShadow` directional or spot light, HDR bloom that only takes light brighter than white, and distance fog that fades into the background color. [`Lighting.studio()`](packages/framefields/src/lighting.ts) / `soft` / `sunset` / `dramatic` rigs set all of it up in one call.
+- **Skeletal animation & materials** — 128-bone Linear Blend Skinning; glTF base color, normal, metallic-roughness, occlusion and emissive maps; SSAO and optical DoF.
 - **Physical motion blur** — 180° shutter motion blur with per-vertex velocity vectors packed into `rg16float` MRT buffers.
 
 ### 4. Audio Layers, Procedural SFX & Reactive Signals

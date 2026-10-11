@@ -15,6 +15,10 @@ import type { CompositorProgramConfig, LayoutNode } from "./schema.js";
 
 /**
  * Camera Transition Type across scene boundaries.
+ *
+ * @deprecated Recorded on scenes but not rendered. Use framefields'
+ * `Layer.sequence([...])` with `Transition.push` / `wipe` / `iris` /
+ * `crossfade` / `zoom` / `whip`, which render as keyframes and mattes.
  */
 export const SceneTransitionTypeSchema = z.enum([
 	"cut", // Instant zero-frame hard cut

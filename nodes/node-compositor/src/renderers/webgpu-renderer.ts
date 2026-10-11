@@ -20,16 +20,19 @@ import { TemporalDeflickerPipeline } from "@framefields/tensor-webgpu";
 import {
 	AudioLatentTrackCache,
 	type BlendMode,
+	type BloomOptions,
 	Camera3D,
 	type Camera3DPose,
 	type Color,
 	type DrawMesh3DOpts,
 	type DrawQuad3DOpts,
+	type Environment3DOptions,
 	type ExtrudedTextGeometryOptions,
 	type GPUMeshBuffers,
 	generateExtrudedTextGeometry,
 	getPrimitiveGeometry,
 	jointMatrices,
+	Light3D,
 	type Light3DOptions,
 	type Mat4,
 	Matrix4Math,
@@ -42,6 +45,7 @@ import {
 	type RenderContextValue,
 	Renderer3D,
 	ScreenSpaceRelightPipeline,
+	type ShadowCaster3D,
 	type ShapeFillConfig,
 	type ShapeGeometryConfig,
 	SlugFontCache,
@@ -561,6 +565,45 @@ function drawProjectedQuad(
 	renderPass.end();
 }
 
+/**
+ * Emissive and shadow participation for a 3D draw: animated values first,
+ * then the node's own, then (meshes) the model file's material.
+ */
+function surfaceProps(
+	target: any,
+	lop: any,
+	mat?: { emissive?: [number, number, number]; emissiveStrength?: number },
+): {
+	emissive?: string | [number, number, number];
+	emissiveIntensity?: number;
+	castShadow?: boolean;
+} {
+	// glTF emissiveFactor is linear; draws take display (sRGB) colors.
+	const toSrgb = (v: number) =>
+		v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055;
+	const emissive =
+		target?.emissive ??
+		lop.emissive ??
+		(mat?.emissive
+			? ([
+					toSrgb(mat.emissive[0]),
+					toSrgb(mat.emissive[1]),
+					toSrgb(mat.emissive[2]),
+				] as [number, number, number])
+			: undefined);
+	const out: ReturnType<typeof surfaceProps> = {};
+	if (emissive !== undefined) {
+		out.emissive = emissive;
+		out.emissiveIntensity =
+			target?.emissiveIntensity ??
+			lop.emissiveIntensity ??
+			mat?.emissiveStrength ??
+			1;
+	}
+	if (lop.castShadow !== undefined) out.castShadow = lop.castShadow;
+	return out;
+}
+
 function computeContainerScissor(
 	matrix: DOMMatrix,
 	width: number,
@@ -871,6 +914,9 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		let camera: Camera3DPose | null = null;
 		let dofEnabled = false;
 		const sceneLights: Light3DOptions[] = [];
+		let sceneEnvironment: Environment3DOptions | null = null;
+		let sceneBloom: BloomOptions | null = null;
+		let shadowMapSize: number | undefined;
 
 		if (is3DScene) {
 			const camOp = cameraVM?.operation as any;
@@ -993,7 +1039,31 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 					| "ambient"
 					| "directional"
 					| "point"
-					| "spot";
+					| "spot"
+					| "environment";
+				if (lightType === "environment") {
+					// The scene's world: the last visible one wins.
+					const intensity = target?.intensity ?? lop.intensity;
+					sceneEnvironment = {
+						preset: lop.preset,
+						top: lop.top,
+						horizon: lop.horizon,
+						bottom: lop.bottom,
+						softboxes: target?.softboxes ?? lop.softboxes,
+						rotation: target?.rotation ?? lop.rotation,
+						exposure: target?.exposure ?? lop.exposure,
+						toneMapping: lop.toneMapping,
+						fog: lop.fog,
+						...(intensity !== undefined && { intensity }),
+					};
+					sceneBloom =
+						lop.bloom === true
+							? {}
+							: lop.bloom && typeof lop.bloom === "object"
+								? { ...lop.bloom }
+								: null;
+					continue;
+				}
 				const rawColor = target?.color ?? lop.color ?? "#ffffff";
 				const color = parseColor(rawColor);
 				const intensity = target?.intensity ?? lop.intensity ?? 1.0;
@@ -1018,7 +1088,13 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 					angle,
 					penumbra,
 					decay,
+					castShadow: Boolean(lop.castShadow),
+					shadowSoftness: target?.shadowSoftness ?? lop.shadowSoftness,
+					shadowDarkness: target?.shadowDarkness ?? lop.shadowDarkness,
 				});
+				if (lop.castShadow && lop.shadowMapSize) {
+					shadowMapSize = lop.shadowMapSize;
+				}
 			}
 		}
 
@@ -1041,6 +1117,11 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 					meshBuffers?: GPUMeshBuffers;
 			  };
 		const pending3DItems: Pending3DItem[] = [];
+		/** Textures the queued 3D items still read: their layers and mattes. */
+		const pendingTextures = (): GPUTexture[] =>
+			pending3DItems
+				.flatMap((q) => [q.texture, q.opts.matte])
+				.filter((t): t is GPUTexture => Boolean(t));
 
 		const flush3DPass = (
 			curTex: GPUTexture,
@@ -1068,9 +1149,7 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 				}
 			}
 
-			const itemTextures = pending3DItems
-				.map((q) => (q.kind === "quad" ? q.texture : q.texture))
-				.filter((t): t is GPUTexture => Boolean(t));
+			const itemTextures = pendingTextures();
 
 			const scene3dTex = ctx.renderer.getTemporaryTexture(
 				nativeWidth,
@@ -1089,6 +1168,54 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 				linearDepthView = linearDepthTex.createView();
 			}
 
+			// Shadow map from the first castShadow light: meshes cast unless
+			// they opt out, flat layers only when they opt in; everything
+			// in the pass can receive.
+			let shadow: ReturnType<typeof r3d.renderShadowMap> = null;
+			const casterIndex = Light3D.shadowCasterIndex(sceneLights);
+			if (casterIndex >= 0) {
+				const casters: ShadowCaster3D[] = [];
+				const receivers: ReturnType<typeof r3d.worldBounds>[] = [];
+				for (const item of pending3DItems) {
+					if (item.kind === "mesh") {
+						const caster: ShadowCaster3D = {
+							kind: "mesh",
+							mesh: item.mesh,
+							buffers: item.meshBuffers,
+							opts: item.opts,
+						};
+						receivers.push(r3d.worldBounds(caster));
+						if (
+							item.opts.castShadow !== false &&
+							item.opts.material !== "unlit"
+						) {
+							casters.push(caster);
+						}
+					} else if (item.kind === "quad") {
+						const caster: ShadowCaster3D = {
+							kind: "quad",
+							texture: item.texture,
+							opts: item.opts,
+						};
+						receivers.push(r3d.worldBounds(caster));
+						if (item.opts.castShadow === true) casters.push(caster);
+					}
+				}
+				const shadowLight = sceneLights.filter(
+					(l) => (l.lightType ?? l.type) !== "ambient",
+				)[casterIndex];
+				if (shadowLight && casters.length > 0) {
+					shadow = r3d.renderShadowMap(
+						encoder,
+						shadowLight,
+						casterIndex,
+						casters,
+						receivers,
+						{ mapSize: shadowMapSize },
+					);
+				}
+			}
+
 			const {
 				pass: pass3d,
 				cameraBindGroup,
@@ -1104,6 +1231,8 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 				{ r: 0, g: 0, b: 0, a: 0 },
 				linearDepthView,
 				sceneLights,
+				{ environment: sceneEnvironment, shadow },
+				Boolean(sceneBloom),
 			);
 
 			for (const item of pending3DItems) {
@@ -1158,6 +1287,22 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 				final3dTex = dofResultTex;
 			}
 
+			if (sceneBloom) {
+				const bloomTex = ctx.renderer.getTemporaryTexture(
+					nativeWidth,
+					nativeHeight,
+					[curTex, targetTexture, final3dTex, scene3dTex, ...curExcludes],
+				);
+				r3d.applyBloom(
+					encoder,
+					final3dTex,
+					bloomTex,
+					sceneBloom,
+					r3d.hdrSource(),
+				);
+				final3dTex = bloomTex;
+			}
+
 			const nextTex = ctx.renderer.composite(
 				encoder,
 				curTex,
@@ -1193,9 +1338,16 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 			let activeTex = initialTex;
 			let activeView = initialView;
 			let activeExcludes = excludes;
+			// Matte layers are not drawn on their own: their owner draws them.
+			const mattesByOwner = new Map<string, VirtualMediaData>();
+			for (const vm of vms) {
+				const owner = (vm.operation as any)?.matteOf;
+				if (owner) mattesByOwner.set(owner, vm);
+			}
 			for (const child of sorted) {
 				const lop = child.operation as any;
 				if (lop.kind === "camera" || lop.kind === "light") continue;
+				if (lop.matteOf) continue;
 				const targetId = lop.id || lop.inputHandleId;
 				const target = targetId ? targetsById[targetId] : undefined;
 				const isChild3D =
@@ -1234,6 +1386,149 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 					continue;
 				}
 				nodeIndex += 1;
+				const matteVM = lop.matteId ? mattesByOwner.get(lop.id) : undefined;
+				if (matteVM) {
+					// Draws a layer alone on transparent. 3D content it queues is
+					// rendered into it right away, in a pass of its own.
+					const isolate = async (vm: VirtualMediaData, index: number) => {
+						const queued = pending3DItems.splice(0);
+						const busy = [
+							targetTexture,
+							activeTex,
+							...activeExcludes,
+							...queued.flatMap((q) => [q.texture, q.opts.matte]),
+						].filter((t): t is GPUTexture => Boolean(t));
+						const tex = ctx.renderer.getTemporaryTexture(
+							targetW,
+							targetH,
+							busy,
+						);
+						const view = tex.createView();
+						ctx.renderer
+							.beginFrame(
+								encoder,
+								view,
+								{ r: 0, g: 0, b: 0, a: 0 },
+								targetW,
+								targetH,
+								"clear",
+							)
+							.end();
+						const out = await renderLayerVM(
+							vm,
+							index,
+							tex,
+							view,
+							busy.filter((t) => t !== targetTexture),
+							accumulatedOpacity,
+							parentMatrix,
+							parentRect,
+							targetW,
+							targetH,
+							parent3DMatrix,
+							false,
+						);
+						const drawn = out?.finalTex ?? tex;
+						const flat = flush3DPass(drawn, drawn.createView(), busy).finalTex;
+						pending3DItems.push(...queued);
+						return flat;
+					};
+					const mode: string = (matteVM.operation as any).matteMode ?? "alpha";
+					const blend =
+						mode === "luma"
+							? "luma-in"
+							: mode === "luma-inverted"
+								? "luma-out"
+								: mode === "alpha-inverted"
+									? "destination-out"
+									: "destination-in";
+
+					if (isChild3D) {
+						// A 3D layer is matted inside the 3D pass, so it keeps its
+						// depth against the rest of the scene: the matte is resolved
+						// to screen coverage, and everything the owner queues shows
+						// only where that coverage does.
+						let coverage = await isolate(matteVM, nodeIndex);
+						activeExcludes = [...activeExcludes, coverage];
+						nodeIndex += 1;
+						if (mode !== "alpha") {
+							const white = ctx.renderer.getTemporaryTexture(
+								targetW,
+								targetH,
+								[targetTexture, activeTex, ...activeExcludes, ...pendingTextures()],
+							);
+							ctx.renderer
+								.beginFrame(
+									encoder,
+									white.createView(),
+									{ r: 1, g: 1, b: 1, a: 1 },
+									targetW,
+									targetH,
+									"clear",
+								)
+								.end();
+							coverage = ctx.renderer.composite(encoder, white, coverage, blend, [
+								targetTexture,
+								activeTex,
+								...activeExcludes,
+								...pendingTextures(),
+								white,
+							]);
+							activeExcludes = [...activeExcludes, coverage];
+						}
+						const before = pending3DItems.length;
+						const res = await renderLayerVM(
+							child,
+							nodeIndex,
+							activeTex,
+							activeView,
+							activeExcludes,
+							accumulatedOpacity,
+							parentMatrix,
+							parentRect,
+							targetW,
+							targetH,
+							parent3DMatrix,
+							isRootScene,
+						);
+						for (const item of pending3DItems.slice(before)) {
+							item.opts.matte = coverage;
+						}
+						if (res) {
+							if (res.finalTex !== activeTex) {
+								activeExcludes = [...activeExcludes, res.finalTex];
+							}
+							activeTex = res.finalTex;
+							activeView = res.finalView;
+						}
+						continue;
+					}
+
+					// Track matte: owner and matte each drawn alone, then the
+					// owner keeps only what the matte's alpha / brightness allows.
+					const contentTex = await isolate(child, nodeIndex);
+					activeExcludes = [...activeExcludes, contentTex];
+					nodeIndex += 1;
+					const matteTex = await isolate(matteVM, nodeIndex);
+					const masked = ctx.renderer.composite(
+						encoder,
+						contentTex,
+						matteTex,
+						blend,
+						[targetTexture, activeTex, ...activeExcludes, matteTex],
+					);
+					const next = ctx.renderer.composite(
+						encoder,
+						activeTex,
+						masked,
+						"normal",
+						[targetTexture, ...activeExcludes, matteTex],
+					);
+					activeExcludes = [...activeExcludes, next];
+					activeTex = next;
+					activeView = next.createView();
+					continue;
+				}
 				const res = await renderLayerVM(
 					child,
 					nodeIndex,
@@ -1288,9 +1583,7 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 			// layer of the same size must not be handed one from the pool.
 			const excludes = [
 				...baseExcludes,
-				...pending3DItems
-					.map((q) => q.texture)
-					.filter((t): t is GPUTexture => Boolean(t)),
+				...pendingTextures(),
 			];
 			const lop = nodeVM.operation as any;
 			if (lop.kind === "camera" || lop.kind === "light") return;
@@ -1743,9 +2036,11 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 						ambientIntensity:
 							target?.ambientIntensity ?? lop.ambientIntensity ?? 1.0,
 						metallic: target?.metallic ?? lop.metallic ?? mat?.metallic,
+						...surfaceProps(target, lop, mat),
 						audioDeform: meshAudioDeform,
 					};
 
+					if (mat) meshOpts.maps = await r3d.materialMaps(mat);
 					pending3DItems.push({
 						kind: "mesh",
 						mesh,
@@ -2041,9 +2336,7 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 						activeTex,
 						targetTexture,
 						...excludes,
-						...pending3DItems
-							.map((q) => q.texture)
-							.filter((t): t is GPUTexture => Boolean(t)),
+						...pendingTextures(),
 					];
 					const groupTex = ctx.renderer.getTemporaryTexture(
 						texW,
@@ -2226,6 +2519,7 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 							target?.specularIntensity ?? lop.specularIntensity,
 						ambientIntensity: target?.ambientIntensity ?? lop.ambientIntensity,
 						metallic: target?.metallic ?? lop.metallic,
+						...surfaceProps(target, lop),
 						...(modelMatrix && { modelMatrix }),
 					};
 
@@ -3632,6 +3926,7 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 					specularIntensity: target?.specularIntensity ?? lop.specularIntensity,
 					ambientIntensity: target?.ambientIntensity ?? lop.ambientIntensity,
 					metallic: target?.metallic ?? lop.metallic,
+					...surfaceProps(target, lop),
 					...(modelMatrix && { modelMatrix }),
 				};
 

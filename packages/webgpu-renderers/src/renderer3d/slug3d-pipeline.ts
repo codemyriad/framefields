@@ -2,10 +2,13 @@ import type { Mat4 } from "../math3d/index.js";
 import { BufferPool } from "../renderer2d/buffer-pool.js";
 import { slug3dWgsl } from "../shaders/slug3d.js";
 import type { SlugFont } from "../slug/slug-loader.js";
+import { fullCoverageView, matteLayoutEntry } from "./matte3d.js";
+import { BloomPipelineVariants } from "./pipeline-variants.js";
 import {
 	type MaterialUniformData,
 	packMaterialParams,
 } from "./quad3d-pipeline.js";
+import { packSurfaceParams, SURFACE_PARAMS_FLOATS } from "./surface-params.js";
 
 export interface Slug3DUniformData extends MaterialUniformData {
 	/** Paragraph px to world */
@@ -17,6 +20,8 @@ export interface Slug3DUniformData extends MaterialUniformData {
 	twoSided: boolean;
 	/** Fraction of the distance to the eye the glyphs slide toward it, to stack on their plane */
 	depthPull: number;
+	/** Screen-space track matte: the text shows where this texture's alpha does. */
+	matte?: GPUTexture;
 }
 
 const INSTANCE_FLOATS = 24;
@@ -26,13 +31,14 @@ export class Slug3DPipeline {
 	private device: GPUDevice;
 	private pipelineSingle: GPURenderPipeline;
 	private pipelineMrt: GPURenderPipeline;
+	private bloomVariants: BloomPipelineVariants;
 	private modelLayout: GPUBindGroupLayout;
 	private fontLayout: GPUBindGroupLayout;
 	private modelPool: BufferPool;
 	private instancePool: BufferPool;
 	private fontBindGroups = new WeakMap<GPUTexture, GPUBindGroup>();
-	// 16 (model) + 16 (normal) + 4 (params) + 4 (materialParams) = 40 floats (160 bytes)
-	private modelData = new Float32Array(40);
+	// 16 (model) + 16 (normal) + 4 (params) + 4 (materialParams) + 8 (pbr, emissive) = 48 floats (192 bytes)
+	private modelData = new Float32Array(40 + SURFACE_PARAMS_FLOATS);
 
 	constructor(
 		device: GPUDevice,
@@ -45,7 +51,7 @@ export class Slug3DPipeline {
 	) {
 		this.device = device;
 		this.modelPool = new BufferPool(
-			160,
+			(40 + SURFACE_PARAMS_FLOATS) * 4,
 			GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
 		);
 		this.instancePool = new BufferPool(
@@ -66,6 +72,7 @@ export class Slug3DPipeline {
 					visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
 					buffer: { type: "uniform" },
 				},
+				matteLayoutEntry(1),
 			],
 		});
 
@@ -163,6 +170,17 @@ export class Slug3DPipeline {
 			primitive,
 			multisample,
 		});
+
+		this.bloomVariants = new BloomPipelineVariants(device, {
+			label: "Slug3DPipeline",
+			layout,
+			vertex,
+			module,
+			format,
+			depthStencil,
+			primitive,
+			multisample,
+		});
 	}
 
 	resetPools(): void {
@@ -179,6 +197,7 @@ export class Slug3DPipeline {
 		instanceCount: number,
 		data: Slug3DUniformData,
 		useMrt = false,
+		useBloom = false,
 	): void {
 		if (instanceCount === 0 || !font.curvesTex || !font.bandsTex) return;
 
@@ -189,18 +208,31 @@ export class Slug3DPipeline {
 		this.modelData[34] = data.twoSided ? 1.0 : 0.0;
 		this.modelData[35] = data.depthPull;
 		this.modelData.set(packMaterialParams(data), 36);
+		packSurfaceParams(data, this.modelData, 40);
 
 		const modelBuffer = this.modelPool.getBuffer(this.device, this.modelData);
 		const modelBindGroup = this.device.createBindGroup({
 			layout: this.modelLayout,
-			entries: [{ binding: 0, resource: { buffer: modelBuffer } }],
+			entries: [
+				{ binding: 0, resource: { buffer: modelBuffer } },
+				{
+					binding: 1,
+					resource: data.matte?.createView() ?? fullCoverageView(this.device),
+				},
+			],
 		});
 		const instanceBuffer = this.instancePool.getBuffer(
 			this.device,
 			instances.subarray(0, instanceCount * INSTANCE_FLOATS),
 		);
 
-		pass.setPipeline(useMrt ? this.pipelineMrt : this.pipelineSingle);
+		pass.setPipeline(
+			useBloom
+				? this.bloomVariants.get(useMrt)
+				: useMrt
+					? this.pipelineMrt
+					: this.pipelineSingle,
+		);
 		pass.setBindGroup(0, cameraBindGroup);
 		pass.setBindGroup(1, modelBindGroup);
 		pass.setBindGroup(2, this.fontBindGroup(font.curvesTex, font.bandsTex));

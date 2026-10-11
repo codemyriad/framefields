@@ -3,6 +3,7 @@ import path from "node:path";
 import {
 	registerHeadlessFont,
 	SlugFontCache,
+	SlugGeometry,
 } from "@framefields/webgpu-renderers";
 import * as fontkit from "fontkit";
 
@@ -160,6 +161,49 @@ async function resolveSourceBuffer(
 /**
  * Central singleton manager for font registration, TTF validation, and compositor typography binding.
  */
+export interface MeasureTextOptions {
+	fontFamily: string;
+	fontSize?: number;
+	fontWeight?: string | number;
+	/** Extra px between characters, as on `Layer.text`. */
+	letterSpacing?: number;
+	/** Multiplier of fontSize when < 10, else px. Default 1.2. */
+	lineHeight?: number;
+	/** Wrap width in px; omit for one line per `\n`. */
+	width?: number;
+	align?: "left" | "center" | "right";
+}
+
+export interface MeasuredGlyph {
+	char: string;
+	/** Index into the string (code units), matching `text.slice`. */
+	index: number;
+	/** Left edge of the glyph, relative to the text box. */
+	x: number;
+	/** Baseline-relative top of the line box. */
+	y: number;
+	/** Advance width in px. */
+	width: number;
+	line: number;
+}
+
+export interface TextMetrics {
+	width: number;
+	height: number;
+	lines: number;
+	/** Line box height in px. */
+	lineHeight: number;
+	glyphs: MeasuredGlyph[];
+	/**
+	 * X of a caret placed after `count` characters (0 = before the first),
+	 * relative to the text box. Pair with a `.keys("text", …)` reveal to make
+	 * a cursor follow typing exactly.
+	 */
+	caretX(count: number): number;
+	/** Width of the first `count` characters (same as `caretX` on one line). */
+	widthOf(count: number): number;
+}
+
 export class FontManager {
 	private static instance: FontManager | null = null;
 	private readonly fonts = new Map<string, RegisteredFont>();
@@ -200,6 +244,80 @@ export class FontManager {
 			filePath ?? (typeof source === "string" ? source : "Uint8Array");
 		validateFontBinaryHeader(buffer, label);
 		SlugFontCache.setEmojiFont(buffer, filePath);
+	}
+
+	/**
+	 * Measures text with the real font, exactly as `Layer.text` lays it out:
+	 * box size, line count, per-glyph positions and caret offsets. Use it to
+	 * size containers, place cursors, underline a word or center by ink
+	 * instead of guessing advances. The family must be registered first.
+	 *
+	 * ```ts
+	 * const m = FontManager.measure("Hello", { fontFamily: "Inter", fontSize: 60 });
+	 * m.width; m.caretX(3); m.glyphs[1].x
+	 * ```
+	 */
+	public static measure(
+		text: string,
+		options: MeasureTextOptions,
+	): TextMetrics {
+		const fontSize = options.fontSize ?? 48;
+		const font = SlugFontCache.getFont(
+			options.fontFamily,
+			options.fontWeight,
+			null,
+		);
+		if (!font) {
+			throw new Error(
+				`FontManager.measure: font "${options.fontFamily}" is not registered. ` +
+					"Call `await FontManager.register(...)` first.",
+			);
+		}
+		const lineHeight =
+			options.lineHeight !== undefined && options.lineHeight < 10
+				? options.lineHeight * fontSize
+				: (options.lineHeight ?? fontSize * 1.2);
+		const letterSpacing = options.letterSpacing ?? 0;
+		const { width, height, layout } = SlugGeometry.measure(
+			text,
+			font,
+			fontSize,
+			letterSpacing,
+			lineHeight,
+			options.width,
+		);
+		const scale = fontSize / font.unitsPerEm;
+		// Map glyphs back to string indices (layout counts graphemes).
+		const glyphs: MeasuredGlyph[] = [];
+		let cursor = 0;
+		for (const g of layout.glyphs) {
+			const at = text.indexOf(g.char, cursor);
+			const index = at >= 0 ? at : cursor;
+			cursor = index + g.char.length;
+			glyphs.push({
+				char: g.char,
+				index,
+				x: g.x,
+				y: g.y,
+				width: g.cp.advanceWidth * (g.fontScale ?? scale) + letterSpacing,
+				line: g.lineIndex,
+			});
+		}
+		const caretX = (count: number): number => {
+			if (count <= 0 || glyphs.length === 0) return glyphs[0]?.x ?? 0;
+			const before = glyphs.filter((g) => g.index < count);
+			const last = before[before.length - 1];
+			return last ? last.x + last.width - letterSpacing : 0;
+		};
+		return {
+			width,
+			height,
+			lines: layout.linesCount,
+			lineHeight,
+			glyphs,
+			caretX,
+			widthOf: (count: number) => caretX(count) - (glyphs[0]?.x ?? 0),
+		};
 	}
 
 	/**

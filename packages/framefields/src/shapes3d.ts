@@ -17,7 +17,44 @@ import {
 import { autoId } from "./ids.js";
 import { type AnimatableNode, Layer } from "./index.js";
 
-export interface CubeFaceConfig {
+/** Physically based surface options every 3D builder accepts. */
+export interface Surface3DOptions {
+	/** Light the surface gives off: a CSS color added on top of lighting. */
+	emissive?: string;
+	/** Emissive multiplier; above 1 glows past white and blooms. Default 1. */
+	emissiveIntensity?: number;
+	/** Falls into a `castShadow` light's shadow map (meshes default on, flat layers off). */
+	castShadow?: boolean;
+}
+
+const MATERIAL_KEYS = [
+	"material",
+	"shininess",
+	"roughness",
+	"specularIntensity",
+	"metallic",
+	"ambientIntensity",
+	"ior",
+	"transmission",
+	"dispersion",
+	"fresnelPower",
+	"envIntensity",
+	"emissive",
+	"emissiveIntensity",
+	"castShadow",
+] as const;
+
+/** The material and surface options that were actually given. */
+function materialProps(o: object): Record<string, unknown> {
+	const src = o as Record<string, unknown>;
+	const out: Record<string, unknown> = {};
+	for (const k of MATERIAL_KEYS) {
+		if (src[k] !== undefined) out[k] = src[k];
+	}
+	return out;
+}
+
+export interface CubeFaceConfig extends Surface3DOptions {
 	background?: string;
 	borderRadius?: number;
 	borderWidth?: number;
@@ -39,7 +76,7 @@ export interface CubeFaceConfig {
 
 export type CubeFaceInput = CubeFaceConfig | LayoutNode | string;
 
-export interface Cube3DOptions {
+export interface Cube3DOptions extends Surface3DOptions {
 	id?: string;
 	size: number | [number, number, number];
 	x?: number;
@@ -115,7 +152,7 @@ export interface Prism3DOptions {
 	opacity?: number;
 }
 
-export interface Plane3DOptions {
+export interface Plane3DOptions extends Surface3DOptions {
 	id?: string;
 	width: number;
 	height: number;
@@ -160,7 +197,7 @@ export interface Grid3DOptions {
 	opacity?: number;
 }
 
-export interface Text3DOptions {
+export interface Text3DOptions extends Surface3DOptions {
 	id?: string;
 	text: string;
 	fontSize?: number;
@@ -222,7 +259,7 @@ export interface ExtrudedText3DOptions extends Text3DOptions {
 }
 
 /** Node props shared by the mesh primitives (roundedBox, sphere, cylinder). */
-export interface Primitive3DNodeOptions {
+export interface Primitive3DNodeOptions extends Surface3DOptions {
 	id?: string;
 	x?: number;
 	y?: number;
@@ -309,6 +346,11 @@ function primitiveNode(
 		specularIntensity: o.specularIntensity ?? 0.5,
 		ambientIntensity: o.ambientIntensity ?? 1.0,
 		metallic: o.metallic,
+		...materialProps({
+			emissive: o.emissive,
+			emissiveIntensity: o.emissiveIntensity,
+			castShadow: o.castShadow,
+		}),
 		twoSided: false,
 		startFrame: o.startFrame,
 		durationFrames: o.durationFrames,
@@ -427,6 +469,11 @@ export const Layer3D = {
 				metallic: cfg.metallic ?? options.metallic,
 				ambientIntensity:
 					cfg.ambientIntensity ?? options.ambientIntensity ?? 1.0,
+				...materialProps({
+					emissive: cfg.emissive ?? options.emissive,
+					emissiveIntensity: cfg.emissiveIntensity ?? options.emissiveIntensity,
+					castShadow: cfg.castShadow ?? options.castShadow,
+				}),
 				background: cfg.background ?? defaultColor,
 				borderRadius: cfg.borderRadius ?? 0,
 				borderWidth: cfg.borderWidth,
@@ -644,6 +691,7 @@ export const Layer3D = {
 			background: options.background ?? "#3b82f6",
 			borderRadius: options.borderRadius ?? 0,
 			opacity: options.opacity ?? 1,
+			...materialProps(options),
 			children: options.children ?? [],
 		});
 	},
@@ -753,6 +801,7 @@ export const Layer3D = {
 			specularIntensity: options.specularIntensity ?? 0.8,
 			ambientIntensity: options.ambientIntensity ?? 1.0,
 			metallic: options.metallic,
+			...materialProps(options),
 			opacity: options.opacity ?? 1,
 			background: options.background,
 			borderRadius: options.borderRadius,
@@ -833,6 +882,7 @@ export const Layer3D = {
 			specularIntensity: options.specularIntensity ?? 0.8,
 			ambientIntensity: options.ambientIntensity ?? 1.0,
 			metallic: options.metallic,
+			...materialProps(options),
 			twoSided: options.twoSided ?? true,
 			// What the compositor rebuilds the mesh from when modelData did not
 			// survive (a spec sent as JSON): the same tolerance as here.

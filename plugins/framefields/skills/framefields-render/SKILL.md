@@ -34,6 +34,9 @@ if (!parsed.success) {
   console.error("Schema validation failed:", parsed.error.format());
   process.exit(1);
 }
+
+// 3. Lint: things that render without error but not as intended
+for (const d of comp.lint()) console.log(`${d.severity} ${d.code}: ${d.message}`);
 ```
 
 Typecheck the project:
@@ -248,6 +251,16 @@ if (!result.qa!.passed) process.exitCode = 1; // fail CI / the agent loop
 | `frozen_video` | info | Picture unchanged for ≥ `minFrozenSec` (2 s); fine for held title cards |
 | `audio_silence` | info | ≥ `minSilenceSec` (2 s) below `silenceDbfs` (-60) |
 | `audio_silent` | info | The whole track is silent |
+| `invalid_gradient` | error | A `background` / `fill` gradient string that does not parse: it draws nothing |
+| `unknown_color` | warning | A color string that is not a color: it draws transparent |
+| `low_contrast_text` | warning | Text below 3:1 contrast against the solid color behind it (suggests a readable one) |
+| `offscreen_layer` | warning | A static absolute layer entirely outside the canvas |
+| `shadow_unsupported_light` | warning | `castShadow` on a point or ambient light |
+| `pbr_without_environment` | info | `roughness` / `metallic` set but no `Layer.environment()` (no physical shading) |
+| `multiple_shadow_lights` | info | Several `castShadow` lights; only the first casts |
+| `static_track` | info | Every keyframe on a track holds the same value |
+
+The document checks also run on their own, before any render: `comp.lint()` returns the same `{ severity, code, message, layerId }` entries. Run it in Step 1, right after typechecking.
 
 `passed` is false when any error or warning is present. `qa.audio.integratedLufs` is ITU-R BS.1770 loudness (streaming platforms normalize to about -14 LUFS); `qa.audio.peakDbfs` is the sample peak.
 

@@ -1,3 +1,4 @@
+import { mixColors } from "@framefields/core";
 import { signalRegistry } from "@framefields/webgpu-renderers";
 import type {
 	AnimationTrack,
@@ -557,20 +558,9 @@ function parseHexColor(hex: string): [number, number, number, number] {
 	return [255, 255, 255, 1];
 }
 
+/** Color keyframes blend perceptually (OKLab) and accept any CSS color. */
 function lerpColor(c1: string, c2: string, t: number): string {
-	if (!c1.startsWith("#") || !c2.startsWith("#")) return t < 0.5 ? c1 : c2;
-	const [r1, g1, b1, a1] = parseHexColor(c1);
-	const [r2, g2, b2, a2] = parseHexColor(c2);
-	const r = Math.round(lerp(r1, r2, t));
-	const g = Math.round(lerp(g1, g2, t));
-	const b = Math.round(lerp(b1, b2, t));
-	const a = lerp(a1, a2, t);
-
-	const toHex = (n: number) => n.toString(16).padStart(2, "0");
-	if (a >= 0.999) {
-		return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
-	}
-	return `rgba(${r}, ${g}, ${b}, ${Math.round(a * 100) / 100})`;
+	return mixColors(c1, c2, t);
 }
 
 function hueToRgb(p: number, q: number, t: number): number {

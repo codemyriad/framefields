@@ -11,6 +11,7 @@
  * Pure + deterministic: same doc → same tree. No width/height resolution
  * here — geometry comes from `computeLayout` at render time.
  */
+
 import {
 	createVirtualMedia,
 	type DataType,
@@ -18,6 +19,7 @@ import {
 	type VirtualMediaData,
 } from "@framefields/core";
 import { collectInlineSignals } from "./inline-signals.js";
+import { hoistMattes } from "./mattes.js";
 import type { CompositorProgramConfig, LayoutNode } from "./schema.js";
 
 import { computeStaggerDelay } from "./stagger.js";
@@ -313,7 +315,7 @@ export function compositorToProgram(
 					(config as any).onRequestFrame ?? (options as any).onRequestFrame,
 			}),
 		},
-		children: config.layout.map((n) =>
+		children: hoistMattes(config.layout).map((n) =>
 			nodeToVirtualMedia(n, resolveMedia, fps, 0, durationMs),
 		),
 	} as unknown as VirtualMediaData;

@@ -153,6 +153,8 @@ const BLEND_MODE_MAP: Record<BlendMode, number> = {
 	lighter: 23,
 	copy: 24,
 	xor: 25,
+	"luma-in": 26,
+	"luma-out": 27,
 };
 
 export class EffectPipeline {
@@ -261,7 +263,10 @@ export class EffectPipeline {
 		});
 
 		const motionBlurPipelineLayout = device.createPipelineLayout({
-			bindGroupLayouts: [this.motionBlurUniformLayout, this.singleTextureLayout],
+			bindGroupLayouts: [
+				this.motionBlurUniformLayout,
+				this.singleTextureLayout,
+			],
 		});
 
 		const motionBlurModule = device.createShaderModule({

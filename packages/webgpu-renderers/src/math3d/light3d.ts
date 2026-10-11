@@ -5,6 +5,11 @@
  * and binary uniform buffer packing for WGSL shaders.
  */
 
+import {
+	type Environment3DOptions,
+	resolveEnvironment,
+	type ShadowUniformInfo,
+} from "./environment3d.js";
 import { type Mat4, Matrix4Math } from "./matrix4.js";
 import { type Vec3, Vector3Math } from "./vector3.js";
 
@@ -14,7 +19,12 @@ export interface Light3DOptions {
 	id?: string;
 	lightType?: LightKind;
 	type?: LightKind;
-	color?: string | [number, number, number] | [number, number, number, number] | { r: number; g: number; b: number; a?: number } | unknown;
+	color?:
+		| string
+		| [number, number, number]
+		| [number, number, number, number]
+		| { r: number; g: number; b: number; a?: number }
+		| unknown;
 	intensity?: number;
 	x?: number;
 	y?: number;
@@ -29,6 +39,12 @@ export interface Light3DOptions {
 	decay?: number; // Attenuation exponent (default 2.0)
 	angle?: number; // Outer cone half-angle in degrees (default 45)
 	penumbra?: number; // Softness fraction [0, 1] (default 0.2)
+	/** Directional or spot: render a shadow map (the first such light wins). */
+	castShadow?: boolean;
+	/** Shadow edge blur in shadow-map texels (default 2). */
+	shadowSoftness?: number;
+	/** 0..1, how dark shadows get (default 1). */
+	shadowDarkness?: number;
 }
 
 export interface GPULightData {
@@ -43,7 +59,11 @@ export interface GPULightData {
 }
 
 export const MAX_LIGHTS = 8;
-export const LIGHT_UNIFORM_SIZE_BYTES = 544; // 16 (ambient) + 16 (params) + 8 * 64 (lights)
+/**
+ * 16 (ambient) + 16 (params) + 8 * 64 (lights), then the physical-shading
+ * block appended after them: 8 vec4 (128) + shadow matrix (64).
+ */
+export const LIGHT_UNIFORM_SIZE_BYTES = 544 + 128 + 64;
 
 export interface LightsUniformData {
 	ambientColor: [number, number, number, number];
@@ -55,7 +75,12 @@ export interface LightsUniformData {
  * Parses CSS / hex / rgb color strings, arrays, or color objects into normalized linear [r, g, b] floats in [0, 1].
  */
 export function parseColorToRgb(
-	color?: string | [number, number, number] | [number, number, number, number] | { r: number; g: number; b: number; a?: number } | unknown,
+	color?:
+		| string
+		| [number, number, number]
+		| [number, number, number, number]
+		| { r: number; g: number; b: number; a?: number }
+		| unknown,
 ): [number, number, number] {
 	if (!color) return [1, 1, 1];
 	if (Array.isArray(color)) {
@@ -89,15 +114,23 @@ export function parseColorToRgb(
 		}
 	}
 
-	const rgbMatch = str.match(/rgba?\s*\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/);
+	const rgbMatch = str.match(
+		/rgba?\s*\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/,
+	);
 	if (rgbMatch) {
 		const r = Number.parseFloat(rgbMatch[1]) / 255;
 		const g = Number.parseFloat(rgbMatch[2]) / 255;
 		const b = Number.parseFloat(rgbMatch[3]) / 255;
-		return [Math.max(0, Math.min(1, r)), Math.max(0, Math.min(1, g)), Math.max(0, Math.min(1, b))];
+		return [
+			Math.max(0, Math.min(1, r)),
+			Math.max(0, Math.min(1, g)),
+			Math.max(0, Math.min(1, b)),
+		];
 	}
 
-	const hslMatch = str.match(/hsla?\s*\(\s*([\d.]+)\s*,\s*([\d.]+)%?\s*,\s*([\d.]+)%?/);
+	const hslMatch = str.match(
+		/hsla?\s*\(\s*([\d.]+)\s*,\s*([\d.]+)%?\s*,\s*([\d.]+)%?/,
+	);
 	if (hslMatch) {
 		const h = Number.parseFloat(hslMatch[1]) / 360;
 		const s = Number.parseFloat(hslMatch[2]) / 100;
@@ -136,10 +169,22 @@ export const Light3D = {
 		}
 		// Transpose of the inverted matrix
 		const normMat: Mat4 = [
-			inv[0], inv[4], inv[8], 0,
-			inv[1], inv[5], inv[9], 0,
-			inv[2], inv[6], inv[10], 0,
-			0, 0, 0, 1,
+			inv[0],
+			inv[4],
+			inv[8],
+			0,
+			inv[1],
+			inv[5],
+			inv[9],
+			0,
+			inv[2],
+			inv[6],
+			inv[10],
+			0,
+			0,
+			0,
+			0,
+			1,
 		];
 		return normMat;
 	},
@@ -202,10 +247,15 @@ export const Light3D = {
 	/**
 	 * Packs active scene lights into a Float32Array matching WGSL LightsUniforms layout.
 	 */
-	packLightsUniforms(lights: Light3DOptions[]): Float32Array {
+	packLightsUniforms(
+		lights: Light3DOptions[],
+		environment?: Environment3DOptions | null,
+		shadow?: ShadowUniformInfo | null,
+	): Float32Array {
 		const buffer = new Float32Array(LIGHT_UNIFORM_SIZE_BYTES / 4);
+		Light3D.packPhysicalBlock(buffer, lights ?? [], environment, shadow);
 
-		if (!lights || lights.length === 0) {
+		if ((!lights || lights.length === 0) && !environment) {
 			// No lights: params.y = 0.0 indicates unlit mode
 			buffer[4] = 0.0; // lightCount = 0
 			buffer[5] = 0.0; // hasLights = 0.0 (unlit)
@@ -242,8 +292,7 @@ export const Light3D = {
 		// Offset 4: params (vec4<f32>)
 		buffer[4] = directLights.length;
 		buffer[5] = 1.0; // hasLights = 1.0 (lit mode)
-		buffer[6] = 0.0;
-		buffer[7] = 0.0;
+		// z = physical shading, w = tone mapping (set by packPhysicalBlock)
 
 		// Offset 8 onwards: array<GPULightData, 8> (each light = 16 floats = 64 bytes)
 		let offset = 8;
@@ -280,5 +329,74 @@ export const Light3D = {
 		}
 
 		return buffer;
+	},
+
+	/** Index (among non-ambient lights) of the light that should cast shadows, or -1. */
+	shadowCasterIndex(lights: Light3DOptions[]): number {
+		let index = 0;
+		for (const l of lights) {
+			const kind = l.lightType ?? l.type;
+			if (kind === "ambient") continue;
+			if (index >= MAX_LIGHTS) break;
+			if (l.castShadow && (kind === "directional" || kind === "spot")) {
+				return index;
+			}
+			index++;
+		}
+		return -1;
+	},
+
+	/** Fills params.zw and the appended physical-shading block (offset 136 on). */
+	packPhysicalBlock(
+		buffer: Float32Array,
+		lights: Light3DOptions[],
+		environment?: Environment3DOptions | null,
+		shadow?: ShadowUniformInfo | null,
+	): void {
+		const base = 8 + MAX_LIGHTS * 16; // first float after the lights array
+		let ambR = 0;
+		let ambG = 0;
+		let ambB = 0;
+		for (const l of lights) {
+			if ((l.lightType ?? l.type) !== "ambient") continue;
+			const [r, g, b] = parseColorToRgb(l.color);
+			const k = l.intensity ?? 1.0;
+			const lin = (v: number) =>
+				v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+			ambR += lin(r) * k;
+			ambG += lin(g) * k;
+			ambB += lin(b) * k;
+		}
+		buffer[base + 0] = ambR;
+		buffer[base + 1] = ambG;
+		buffer[base + 2] = ambB;
+		buffer[base + 3] = 1; // exposure multiplier
+
+		if (environment) {
+			const env = resolveEnvironment(environment);
+			buffer[6] = 1; // physical shading
+			buffer[7] = env.toneMapping;
+			buffer[base + 3] = env.exposureMultiplier;
+			buffer.set([...env.top, env.rotationRad], base + 4);
+			buffer.set([...env.horizon, env.softboxes], base + 8);
+			buffer.set([...env.bottom, 1], base + 12);
+			if (env.fog) {
+				buffer.set([...env.fog.color, 1], base + 16);
+				buffer.set([env.fog.start, env.fog.end, env.fog.opacity, 0], base + 20);
+			}
+		}
+
+		if (shadow && shadow.lightIndex >= 0) {
+			buffer.set(
+				[1, shadow.lightIndex, shadow.softness, shadow.mapSize],
+				base + 24,
+			);
+			buffer.set(
+				[shadow.bias, shadow.normalOffset, shadow.darkness, 0],
+				base + 28,
+			);
+			for (let i = 0; i < 16; i++)
+				buffer[base + 32 + i] = shadow.matrix[i] ?? 0;
+		}
 	},
 };

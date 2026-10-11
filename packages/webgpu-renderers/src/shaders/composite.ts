@@ -85,6 +85,9 @@ fn set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
 		case 23u: { return s + d; } // lighter
 		case 24u: { return s; } // copy
 		case 25u: { return s * (1.0 - da) + d * (1.0 - sa); } // xor
+		// Luma mattes: the overlay's brightness (premultiplied, so transparent = black) masks the base.
+		case 26u: { return d * clamp(dot(s.rgb, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.0, 1.0); } // luma-in
+		case 27u: { return d * (1.0 - clamp(dot(s.rgb, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.0, 1.0)); } // luma-out
 		default: {
 			if (sa <= 0.0) { return d; }
 			if (da <= 0.0) { return s; }

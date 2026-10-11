@@ -128,6 +128,38 @@ export interface CameraFollowPathOptions {
 	ease?: string | EaseRef;
 }
 
+const isKeyframeTrack = (t: AnimationTrack) =>
+	!t.source || t.source.type === "keyframe";
+
+/**
+ * Merges keyframe tracks that animate the same prop into one sorted track,
+ * the later key winning on a shared frame. Procedural tracks (signal,
+ * wiggle, spring…) pass through untouched.
+ */
+export function mergeAnimationTracks(
+	tracks: readonly AnimationTrack[],
+): AnimationTrack[] {
+	const out: AnimationTrack[] = [];
+	const byProp = new Map<string, AnimationTrack>();
+	for (const t of tracks) {
+		if (!isKeyframeTrack(t)) {
+			out.push(t);
+			continue;
+		}
+		const existing = byProp.get(t.prop);
+		if (!existing) {
+			const copy = { ...t, keyframes: [...(t.keyframes ?? [])] };
+			byProp.set(t.prop, copy);
+			out.push(copy);
+			continue;
+		}
+		const frames = new Map(existing.keyframes.map((k) => [k.frame, k]));
+		for (const k of t.keyframes ?? []) frames.set(k.frame, k);
+		existing.keyframes = [...frames.values()].sort((a, b) => a.frame - b.frame);
+	}
+	return out;
+}
+
 function evaluateEasingProgress(
 	ease: string | EaseRef | undefined,
 	t: number,
@@ -483,12 +515,17 @@ export class LayerAnimation implements LayerAnimationSpec {
 		}
 
 		const parsedEase = parseEase(ease);
-		track.keyframes.push({
+		const kf = {
 			id: `k_${track.keyframes.length}_f${frame}`,
 			frame,
 			value,
 			...(parsedEase && { ease: parsedEase }),
-		});
+		};
+		// A key on an occupied frame replaces it (later wins), so behaviours
+		// can be layered in any order without tripping duplicate-frame errors.
+		const at = track.keyframes.findIndex((k) => k.frame === frame);
+		if (at >= 0) track.keyframes[at] = kf;
+		else track.keyframes.push(kf);
 
 		track.keyframes.sort((a, b) => a.frame - b.frame);
 		return this;
@@ -976,6 +1013,28 @@ export class LayerAnimation implements LayerAnimationSpec {
 	public applyTo<T extends { animation?: LayerAnimationSpec }>(node: T): T {
 		node.animation = this.toSpec();
 		return node;
+	}
+
+	/**
+	 * Folds other animations into this one. Keyframe tracks on the same prop
+	 * merge into one track (a later key wins on a shared frame), so separate
+	 * behaviours — an entrance, presses, a wave — can be authored apart:
+	 * `LayerAnimation.merge(rainIn, presses, wave)`.
+	 */
+	public merge(
+		...others: Array<LayerAnimation | { tracks: AnimationTrack[] }>
+	): this {
+		this.tracks = mergeAnimationTracks([
+			...this.tracks,
+			...others.flatMap((o) => o.tracks),
+		]);
+		return this;
+	}
+
+	public static merge(
+		...anims: Array<LayerAnimation | { tracks: AnimationTrack[] }>
+	): LayerAnimation {
+		return new LayerAnimation().merge(...anims);
 	}
 
 	/**

@@ -1,4 +1,8 @@
+import { gradientWgsl } from "./gradient.js";
+
 export const solidWgsl = `
+${gradientWgsl}
+
 struct Uniforms {
     transformCol0 : vec4<f32>,
     transformCol1 : vec4<f32>,
@@ -6,6 +10,7 @@ struct Uniforms {
     params        : vec4<f32>, // x = opacity, y = surfaceWidth, z = surfaceHeight, w = cornerRadius
     color         : vec4<f32>,
     rect          : vec4<f32>, // x, y, width, height
+    gradient      : GradientUniforms, // info.x = 0: solid \`color\`
 };
 
 @group(0) @binding(0) var<uniform> u : Uniforms;
@@ -38,11 +43,15 @@ fn sdRoundedRect(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
     
     let d = sdRoundedRect(in.localPos - center, halfSize, radius);
     let edgeAlpha = 1.0 - smoothstep(0.0, 1.0, d);
-    let alpha = u.color.a * u.params.x * edgeAlpha;
+    var fill = u.color;
+    if (u.gradient.info.x > 0.5) {
+        fill = evalGradient(u.gradient, in.localPos);
+    }
+    let alpha = fill.a * u.params.x * edgeAlpha;
     if (alpha <= 0.0) {
         discard;
     }
     
-    return vec4<f32>(u.color.rgb * alpha, alpha);
+    return vec4<f32>(fill.rgb * alpha, alpha);
 }
 `;

@@ -48,6 +48,20 @@ export interface Material3D {
 	shading?: "lit" | "unlit" | "toon";
 	/** Toon shading: the color multiplier of the shadowed side. */
 	shadeColor?: [number, number, number];
+	/** Linear-ish emissive color 0..1 (glTF emissiveFactor). */
+	emissive?: [number, number, number];
+	/** Emissive multiplier (glTF KHR_materials_emissive_strength). */
+	emissiveStrength?: number;
+	/** Encoded tangent-space normal map (glTF convention: +Y up / OpenGL). */
+	normalTextureBuffer?: Uint8Array;
+	normalScale?: number;
+	/** Encoded map: G = roughness, B = metallic (glTF). */
+	metallicRoughnessTextureBuffer?: Uint8Array;
+	/** Encoded map: R = ambient occlusion. */
+	occlusionTextureBuffer?: Uint8Array;
+	occlusionStrength?: number;
+	/** Encoded emissive color map (multiplies `emissive`). */
+	emissiveTextureBuffer?: Uint8Array;
 }
 
 /** A scene-graph node: its rest transform and parent (glTF node semantics). */
