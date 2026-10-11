@@ -750,12 +750,16 @@ export {
 	type Cube3DOptions,
 	type CubeFaceConfig,
 	type CubeFaceInput,
+	type Cylinder3DOptions,
 	type ExtrudedText3DOptions,
 	type Grid3DOptions,
 	Layer3D,
 	type Plane3DOptions,
+	type Primitive3DNodeOptions,
 	type Prism3DOptions,
+	type RoundedBox3DOptions,
 	type Shape3DContainer,
+	type Sphere3DOptions,
 	type Text3DOptions,
 } from "./shapes3d.js";
 

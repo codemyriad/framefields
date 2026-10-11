@@ -34,6 +34,17 @@ const builders = {
 		Layer.carousel3d({ radius: 200, items: [Layer.box(), Layer.box()] }),
 	plane3d: () => Layer.plane3d({ width: 100, height: 50 }),
 	prism3d: () => Layer.prism3d({ sides: 6, radius: 50, height: 100 }),
+	roundedBox: () =>
+		Layer3D.roundedBox({
+			width: 100,
+			height: 20,
+			depth: 60,
+			radius: 6,
+			taper: 0.9,
+		}),
+	sphere: () => Layer3D.sphere({ radius: 40, color: "#f00" }),
+	cylinder: () =>
+		Layer3D.cylinder({ radiusTop: 10, radiusBottom: 20, height: 40 }),
 	barChart: () =>
 		Layer.chart({
 			type: "bar",

@@ -29,17 +29,24 @@ Every frame of these films is rendered by framefields from TypeScript in [`examp
 
 <table>
   <tr>
-    <td width="33%" align="center">
+    <td width="50%" align="center">
+      <a href="https://youtu.be/k2lgbdL6_TA"><img src="assets/showcase/mac-keyboard.jpg" alt="Mac keyboard from 3D primitives" width="100%"></a>
+      <br><a href="https://youtu.be/k2lgbdL6_TA"><b>Mac Keyboard</b></a>
+      <br><sub><a href="examples/26_mac_keyboard_from_3d_primitives"><code>26_mac_keyboard_from_3d_primitives</code></a></sub>
+    </td>
+    <td width="50%" align="center">
       <a href="https://youtu.be/FVXTqAozAv8"><img src="assets/showcase/framefields-launch.jpg" alt="Framefields launch film" width="100%"></a>
       <br><a href="https://youtu.be/FVXTqAozAv8"><b>Framefields launch</b></a>
       <br><sub><a href="examples/22_framefields_launch"><code>22_framefields_launch</code></a></sub>
     </td>
-    <td width="33%" align="center">
+  </tr>
+  <tr>
+    <td width="50%" align="center">
       <a href="https://youtu.be/9BF1snfmg3o"><img src="assets/showcase/full-circle.jpg" alt="Full Circle film" width="100%"></a>
       <br><a href="https://youtu.be/9BF1snfmg3o"><b>Full Circle</b></a>
       <br><sub><a href="examples/21_full_circle"><code>21_full_circle</code></a></sub>
     </td>
-    <td width="33%" align="center">
+    <td width="50%" align="center">
       <a href="https://youtu.be/RQ3yi_lzPqI"><img src="assets/showcase/dancer.jpg" alt="Dancer showcase film" width="100%"></a>
       <br><a href="https://youtu.be/RQ3yi_lzPqI"><b>Dancer showcase</b></a>
       <br><sub><a href="examples/19_framefields_film"><code>19_framefields_film</code></a></sub>
@@ -131,7 +138,7 @@ A comprehensive suite of professional image/video shader nodes in [`nodes/`](nod
 
 ### 3. Unified 3D Scene Graph, Camera & Mesh Shading
 - **Calibrated camera rig** — LookAt and Turntable cameras ([`Camera3D`](packages/webgpu-renderers/src/math3d/camera3d.ts)) calibrated so `z = 0` matches 2D canvas pixel coordinates 1:1.
-- **3D layout primitives** — [`Layer3D.cube`](packages/framefields/src/shapes3d.ts), `carousel`, `prism`, `plane`, `grid` with unified depth-buffer testing.
+- **3D layout primitives** — [`Layer3D.cube`](packages/framefields/src/shapes3d.ts), `carousel`, `prism`, `plane`, `grid` with unified depth-buffer testing, plus solid smooth-shaded meshes: `roundedBox` (with `taper`, for keycaps and device bodies), `sphere` and `cylinder`.
 - **Zero-dependency model parsers** — OBJ, FBX, glTF/GLB, STL, PLY, VOX, 3DS, OFF.
 - **Skeletal animation & shading** — 128-bone Linear Blend Skinning, Blinn-Phong & PBR multi-light shading, PCSS/Poisson contact shadows, SSAO, and optical DoF.
 - **Physical motion blur** — 180° shutter motion blur with per-vertex velocity vectors packed into `rg16float` MRT buffers.
@@ -667,6 +674,7 @@ The [`examples/`](examples) directory holds production-grade reference compositi
 | [`19_framefields_film`](examples/19_framefields_film) | The 30-second master brand film — full pipeline, audio, VFX, 3D |
 | [`21_full_circle`](examples/21_full_circle) | Multi-scene narrative composition |
 | [`22_framefields_launch`](examples/22_framefields_launch) | Launch/product-motion composition |
+| [`26_mac_keyboard_from_3d_primitives`](examples/26_mac_keyboard_from_3d_primitives) | Mac keyboard product shot from 3D primitives — procedural keycap tapers, typing choreography, and light waves |
 
 ---
 

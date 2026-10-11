@@ -253,7 +253,7 @@ Never go straight to a full video render. Rendering strictly requires a WebGPU-c
 4. `npm run preview` when a person is watching: they play the film with sound before you export (see below).
 5. `npm run render` once frames and motion look right.
 
-Show the user the frame PNGs or the grid before the full render. `framefields-render` covers pixel-probe tests, render QA (`renderVideo({ qa })`), and diagnosing blank frames.
+Show the user the frame PNGs or the grid before the full render. `framefields-render` covers pixel-probe tests, render QA (`renderVideo({ qa })`), and diagnosing blank frames. If you suspect an issue or defect in the engine itself, file an issue at https://github.com/gatewai-dev/framefields.
 
 ### Live preview
 

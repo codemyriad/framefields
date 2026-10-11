@@ -5,9 +5,14 @@ import type {
 	Model3DNode,
 } from "@framefields/compositions/program";
 import {
+	type CylinderGeometryOptions,
 	generateExtrudedTextGeometry,
+	getPrimitiveGeometry,
 	type Model3DData,
+	type PrimitiveGeometryOptions,
+	type RoundedBoxGeometryOptions,
 	SlugFontCache,
+	type SphereGeometryOptions,
 } from "@framefields/webgpu-renderers";
 import { autoId } from "./ids.js";
 import { type AnimatableNode, Layer } from "./index.js";
@@ -214,6 +219,100 @@ export interface ExtrudedText3DOptions extends Text3DOptions {
 	curveSegments?: number;
 	/** Most a flattened curve strays from the outline, in on-screen px at scale 1 (default 0.1). */
 	curveTolerance?: number;
+}
+
+/** Node props shared by the mesh primitives (roundedBox, sphere, cylinder). */
+export interface Primitive3DNodeOptions {
+	id?: string;
+	x?: number;
+	y?: number;
+	z?: number;
+	rotateX?: number;
+	rotateY?: number;
+	rotateZ?: number;
+	scale?: number;
+	scaleX?: number;
+	scaleY?: number;
+	scaleZ?: number;
+	/** Surface color baked into the mesh (default white). */
+	color?: string;
+	/**
+	 * Multiplies the surface color. It is the node's `color`, so animate it
+	 * with `.keys("color", …)`; the baked surface `color` stays fixed.
+	 */
+	tint?: string;
+	material?: MaterialType;
+	shininess?: number;
+	roughness?: number;
+	specularIntensity?: number;
+	ambientIntensity?: number;
+	metallic?: number;
+	opacity?: number;
+	startFrame?: number;
+	durationFrames?: number;
+}
+
+export type RoundedBox3DOptions = Primitive3DNodeOptions &
+	Omit<RoundedBoxGeometryOptions, "type" | "color" | "material">;
+export type Sphere3DOptions = Primitive3DNodeOptions &
+	Omit<SphereGeometryOptions, "type" | "color" | "material">;
+export type Cylinder3DOptions = Primitive3DNodeOptions &
+	Omit<CylinderGeometryOptions, "type" | "color" | "material">;
+
+/** Mesh shading the geometry can bake in; layer materials (glass, …) apply on the node. */
+function meshShading(
+	material: MaterialType | undefined,
+): "lit" | "unlit" | "toon" | undefined {
+	return material === "lit" || material === "unlit" || material === "toon"
+		? material
+		: undefined;
+}
+
+function primitiveNode(
+	prefix: string,
+	geometry: PrimitiveGeometryOptions,
+	o: Primitive3DNodeOptions,
+): AnimatableNode<Model3DNode> {
+	// Only defined keys, so equal shapes share one cached mesh.
+	const spec = Object.fromEntries(
+		Object.entries({
+			...geometry,
+			color: o.color,
+			material: meshShading(o.material),
+			shininess: o.shininess,
+			roughness: o.roughness,
+			metallic: o.metallic,
+		}).filter(([, v]) => v !== undefined),
+	) as unknown as PrimitiveGeometryOptions;
+	return Layer.model({
+		id: o.id ?? autoId(prefix),
+		modelData: getPrimitiveGeometry(spec),
+		// What the compositor rebuilds the mesh from when modelData did not
+		// survive (a spec sent as JSON).
+		primitive3d: spec,
+		is3D: true,
+		x: o.x ?? 0,
+		y: o.y ?? 0,
+		z: o.z ?? 0,
+		rotateX: o.rotateX ?? 0,
+		rotateY: o.rotateY ?? 0,
+		rotateZ: o.rotateZ ?? 0,
+		scale: o.scale ?? 1,
+		scaleX: o.scaleX ?? 1,
+		scaleY: o.scaleY ?? 1,
+		scaleZ: o.scaleZ ?? 1,
+		opacity: o.opacity ?? 1,
+		color: o.tint,
+		material: o.material,
+		shininess: o.shininess ?? 32,
+		roughness: o.roughness,
+		specularIntensity: o.specularIntensity ?? 0.5,
+		ambientIntensity: o.ambientIntensity ?? 1.0,
+		metallic: o.metallic,
+		twoSided: false,
+		startFrame: o.startFrame,
+		durationFrames: o.durationFrames,
+	});
 }
 
 export type Shape3DContainer = AnimatableNode<BoxNode> & {
@@ -744,6 +843,53 @@ export const Layer3D = {
 			faces: [modelNode],
 			items: [modelNode],
 		}) as unknown as Shape3DContainer;
+	},
+
+	/**
+	 * A solid box with rounded edges and corners, as one smooth-shaded mesh:
+	 * cards, buttons, device bodies. `taper` below 1 narrows the top (-y)
+	 * face, the shape of a keycap. Equal shapes share one GPU buffer.
+	 */
+	roundedBox(options: RoundedBox3DOptions): AnimatableNode<Model3DNode> {
+		return primitiveNode(
+			"rounded-box",
+			{
+				type: "roundedBox",
+				width: options.width,
+				height: options.height,
+				depth: options.depth,
+				radius: options.radius,
+				segments: options.segments,
+				taper: options.taper,
+			},
+			options,
+		);
+	},
+
+	/** A UV sphere mesh. */
+	sphere(options: Sphere3DOptions): AnimatableNode<Model3DNode> {
+		return primitiveNode(
+			"sphere",
+			{ type: "sphere", radius: options.radius, segments: options.segments },
+			options,
+		);
+	},
+
+	/** A capped cylinder, or a cone/frustum with different top and bottom radii. */
+	cylinder(options: Cylinder3DOptions): AnimatableNode<Model3DNode> {
+		return primitiveNode(
+			"cylinder",
+			{
+				type: "cylinder",
+				radius: options.radius,
+				radiusTop: options.radiusTop,
+				radiusBottom: options.radiusBottom,
+				height: options.height,
+				segments: options.segments,
+				openEnded: options.openEnded,
+			},
+			options,
+		);
 	},
 
 	/**

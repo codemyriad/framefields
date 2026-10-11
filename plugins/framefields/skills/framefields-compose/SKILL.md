@@ -98,6 +98,7 @@ All `Layer.*` builders return `AnimatableNode<T>` instances with chainable `.ani
 | `Layer.camera(options)` | `"camera"` | 3D scene camera with FOV, lens rack focus, and orbital coordinates. |
 | `Layer.light(options)` | `"light"` | 3D lighting primitive (`ambient`, `directional`, `point`, `spot`). |
 | `Layer.model(options)` | `"model3d"` | 3D mesh loader (`.gltf`, `.glb`, `.obj`, `.fbx`, `.stl`, `.ply`). Supports skinning and audio deformation compute shaders. |
+| `Layer3D.roundedBox / sphere / cylinder(options)` | `"model3d"` | Procedural solid meshes, centered on `x`/`y`/`z` (y is down, so "top" is -y). `roundedBox`: `width`, `height`, `depth`, `radius`, `segments`, `taper` (top face scale, <1 for a keycap). `sphere`: `radius`. `cylinder`: `radius` or `radiusTop`/`radiusBottom`, `height`, `openEnded`. `color` is baked in; `tint` multiplies it and animates as the `color` prop. Equal shapes share one GPU buffer, so hundreds of copies are cheap. |
 
 ---
 

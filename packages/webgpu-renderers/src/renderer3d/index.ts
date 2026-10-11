@@ -2,6 +2,7 @@ export * from "./audio-mesh-deform-pipeline.js";
 export * from "./glass-pipeline.js";
 export * from "./mesh3d-pipeline.js";
 export * from "./motion-blur-pipeline.js";
+export * from "./primitive-geometry.js";
 export * from "./quad3d-pipeline.js";
 export * from "./renderer3d.js";
 export * from "./shadow-pipeline.js";

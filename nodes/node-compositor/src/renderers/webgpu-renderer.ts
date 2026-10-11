@@ -28,6 +28,7 @@ import {
 	type ExtrudedTextGeometryOptions,
 	type GPUMeshBuffers,
 	generateExtrudedTextGeometry,
+	getPrimitiveGeometry,
 	jointMatrices,
 	type Light3DOptions,
 	type Mat4,
@@ -35,6 +36,7 @@ import {
 	type Mesh3DData,
 	type Model3DData,
 	measureMaxCaptionHeight,
+	type PrimitiveGeometryOptions,
 	parseColor,
 	poseNodes,
 	type RenderContextValue,
@@ -1343,6 +1345,13 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 						modelSrc = res.modelData;
 						lop.modelData = modelSrc;
 					}
+				}
+
+				if (!modelSrc && lop.primitive3d) {
+					modelSrc = getPrimitiveGeometry(
+						lop.primitive3d as PrimitiveGeometryOptions,
+					);
+					lop.modelData = modelSrc;
 				}
 
 				if (!modelSrc) return;
@@ -2923,8 +2932,11 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 						typeof target?.text === "number"
 							? Math.max(0, Math.min(1, target.text))
 							: 1;
+					// Above 1, `text` is a count of characters (words, lines), not a fraction.
+					const countsUnits =
+						typeof target?.text === "number" && target.text > 1.0001;
 
-					if (progress >= 1) {
+					if (progress >= 1 && !countsUnits) {
 						displayText = fullText;
 					} else if (progress <= 0) {
 						displayText = "";

@@ -1131,6 +1131,8 @@ export interface Model3DNode {
 	animation?: LayerAnimationSpec;
 	audioDeform?: MeshAudioDeformConfig;
 	text3dOptions?: unknown;
+	/** Layer3D primitive options (roundedBox, sphere, cylinder) the mesh is rebuilt from when modelData is lost. */
+	primitive3d?: unknown;
 }
 
 export type LayoutNode =
@@ -1422,7 +1424,11 @@ export const Model3DNodeSchema: z.ZodType<Model3DNode> = z
 		scaleX: z.number().default(1.0),
 		scaleY: z.number().default(1.0),
 		audioDeform: z.record(z.string(), z.unknown()).optional(),
+		/** Multiplies the model's material colors (animatable as `color`). */
+		color: ColorSchema.optional(),
+		colorTint: ColorSchema.optional(),
 		text3dOptions: z.unknown().optional(),
+		primitive3d: z.unknown().optional(),
 	})
 	.strict() as unknown as z.ZodType<Model3DNode>;
 
