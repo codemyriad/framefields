@@ -153,8 +153,7 @@ describe.skipIf(!maybeDevice)("Fade Audio Processor", () => {
 		expect(channels[0][44099]).toBeCloseTo(0.0, 3);
 	});
 
-	// Known failure: the processor ignores ctx.elapsedMs, so every cut segment fades in from 0.
-	it.fails("should not apply fade in to a cut segment that starts after fadeInDuration (elapsedMs >= fadeInDuration)", async () => {
+	it("should not apply fade in to a cut segment that starts after fadeInDuration (elapsedMs >= fadeInDuration)", async () => {
 		// fadeInDuration = 0.5s. Cut segment starts at 1.0s (elapsedMs = 1000)
 		const virtualMedia = createVirtualMedia(3000, {
 			fadeInDuration: 0.5,
@@ -162,7 +161,8 @@ describe.skipIf(!maybeDevice)("Fade Audio Processor", () => {
 			fadeInCurve: "linear",
 		});
 
-		const channels = constantChannels(22050); // 0.5s chunk
+		// 0.5 amplitude keeps output below the 0.9 soft-clip knee, so output = 0.5 * gain exactly.
+		const channels = constantChannels(22050, 0.5); // 0.5s chunk
 		await fadeAudioProcessor(channels, SAMPLE_RATE, virtualMedia, {
 			device,
 			frame: 0,
@@ -171,14 +171,13 @@ describe.skipIf(!maybeDevice)("Fade Audio Processor", () => {
 			elapsedMs: 1000, // starts at 1.0s of original media (after 0.5s fade in)
 		});
 
-		// Samples should remain at 1.0 throughout (100% gain, no fade-in)
-		expect(channels[0][0]).toBe(1.0);
-		expect(channels[0][11025]).toBe(1.0);
-		expect(channels[0][22049]).toBe(1.0);
+		// Samples should remain at 0.5 throughout (100% gain, no fade-in)
+		expect(channels[0][0]).toBe(0.5);
+		expect(channels[0][11025]).toBe(0.5);
+		expect(channels[0][22049]).toBe(0.5);
 	});
 
-	// Known failure: the processor ignores ctx.elapsedMs, so every cut segment fades in from 0.
-	it.fails("should evaluate partial fade in when cut segment starts inside fadeInDuration", async () => {
+	it("should evaluate partial fade in when cut segment starts inside fadeInDuration", async () => {
 		// fadeInDuration = 1.0s. Cut segment starts at 0.5s (elapsedMs = 500)
 		const virtualMedia = createVirtualMedia(3000, {
 			fadeInDuration: 1.0,
@@ -186,7 +185,8 @@ describe.skipIf(!maybeDevice)("Fade Audio Processor", () => {
 			fadeInCurve: "linear",
 		});
 
-		const channels = constantChannels(22050); // 0.5s chunk (from 0.5s to 1.0s of original media)
+		// 0.5 amplitude keeps output below the 0.9 soft-clip knee, so output = 0.5 * gain exactly.
+		const channels = constantChannels(22050, 0.5); // 0.5s chunk (from 0.5s to 1.0s of original media)
 		await fadeAudioProcessor(channels, SAMPLE_RATE, virtualMedia, {
 			device,
 			frame: 0,
@@ -196,10 +196,10 @@ describe.skipIf(!maybeDevice)("Fade Audio Processor", () => {
 		});
 
 		// First sample of chunk (0.5s mark of media) should start at gain = 0.5
-		expect(channels[0][0]).toBeCloseTo(0.5, 3);
+		expect(channels[0][0]).toBeCloseTo(0.25, 5);
 
 		// End sample of chunk (1.0s mark of media) should reach gain = 1.0
-		expect(channels[0][22049]).toBeCloseTo(1.0, 3);
+		expect(channels[0][22049]).toBeCloseTo(0.5, 3);
 	});
 
 	// Known failure: the fade shader soft-clips above 0.9, so a 1.0 input ends at ~0.976.

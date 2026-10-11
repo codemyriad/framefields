@@ -182,6 +182,9 @@ export const fadeAudioProcessor: AudioProcessor = async (
 	const nodeId = (op.id as string) || "audio-fade";
 	const frame = ctx.frame ?? 0;
 	const fps = ctx.fps ?? 24;
+	// Where this buffer starts in the original media. A cut segment carries its
+	// offset in elapsedMs; without it the buffer is assumed to start at the clip start.
+	const segmentStartSec = Math.max(0, (ctx.elapsedMs ?? 0) / 1000);
 
 	await WebGPUAudioProcessor.process(
 		ctx.device,
@@ -194,8 +197,10 @@ export const fadeAudioProcessor: AudioProcessor = async (
 		FADE_SHADER_TEMPLATE,
 		(chunkTimeSec) => {
 			// chunkTimeSec is (frame / fps + chunkOffset / sampleRate).
-			// Subtracting frame / fps yields chunkOffset / sampleRate, which is time local to clip buffer.
-			const localTimeSec = Math.max(0, chunkTimeSec - frame / fps);
+			// Subtracting frame / fps yields chunkOffset / sampleRate; adding the segment start
+			// puts it on the original media's timeline, the same one clipDuration is measured on.
+			const mediaTimeSec =
+				segmentStartSec + Math.max(0, chunkTimeSec - frame / fps);
 			return [
 				sampleRate,
 				fadeIn,
@@ -205,7 +210,7 @@ export const fadeAudioProcessor: AudioProcessor = async (
 				clipDuration,
 				hasFadeInDurationSig,
 				hasFadeOutDurationSig,
-				localTimeSec, // baseTime (local to clip start!)
+				mediaTimeSec, // baseTime (position in the original media)
 				frame,
 				numSamples,
 				numChannels,
