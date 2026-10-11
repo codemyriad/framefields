@@ -7,6 +7,10 @@
 
 import { BufferPool } from "../renderer2d/buffer-pool.js";
 import { pbrGlassWgsl } from "../shaders/pbr-glass.js";
+import {
+	PREMULTIPLIED_OVER,
+	writeModelTransform,
+} from "./pipeline-variants.js";
 
 export interface GlassUniformData {
 	ior?: number;
@@ -146,18 +150,7 @@ export class GlassPipeline {
 				targets: [
 					{
 						format,
-						blend: {
-							color: {
-								srcFactor: "one",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-							alpha: {
-								srcFactor: "one",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-						},
+						blend: PREMULTIPLIED_OVER,
 					},
 				],
 			},
@@ -174,10 +167,9 @@ export class GlassPipeline {
 
 		// Unit quad centered at origin [-0.5, -0.5] to [0.5, 0.5]
 		const vertices = new Float32Array([
-			-0.5, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
-			 0.5, -0.5, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0,
-			 0.5,  0.5, 0.0, 1.0, 1.0, 0.0, 0.0, -1.0,
-			-0.5,  0.5, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0,
+			-0.5, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.5, -0.5, 0.0, 1.0, 0.0, 0.0,
+			0.0, -1.0, 0.5, 0.5, 0.0, 1.0, 1.0, 0.0, 0.0, -1.0, -0.5, 0.5, 0.0, 0.0,
+			1.0, 0.0, 0.0, -1.0,
 		]);
 		const indices = new Uint16Array([0, 1, 2, 0, 2, 3]);
 
@@ -211,31 +203,19 @@ export class GlassPipeline {
 		data: GlassUniformData,
 	): void {
 		// Pack model uniforms
-		const mat = data.modelMatrix;
-		for (let i = 0; i < 16; i++) {
-			this.modelData[i] = mat[i] ?? 0;
-		}
-
-		const norm = data.normalMatrix ?? mat;
-		for (let i = 0; i < 16; i++) {
-			this.modelData[16 + i] = norm[i] ?? 0;
-		}
-
-		const tint = data.colorTint ?? [1, 1, 1, 1];
-		this.modelData[32] = tint[0];
-		this.modelData[33] = tint[1];
-		this.modelData[34] = tint[2];
-		this.modelData[35] = tint[3];
+		writeModelTransform(
+			this.modelData,
+			data.modelMatrix,
+			data.normalMatrix,
+			data.colorTint,
+		);
 
 		this.modelData[36] = data.opacity ?? 1.0;
 		this.modelData[37] = 0;
 		this.modelData[38] = 1.0; // twoSided
 		this.modelData[39] = 0;
 
-		const modelBuffer = this.modelPool.getBuffer(
-			this.device,
-			this.modelData,
-		);
+		const modelBuffer = this.modelPool.getBuffer(this.device, this.modelData);
 
 		// Pack glass uniforms
 		this.glassData[0] = data.ior ?? 1.49;
@@ -259,10 +239,7 @@ export class GlassPipeline {
 		this.glassData[14] = glassTint[2];
 		this.glassData[15] = glassTint[3];
 
-		const glassBuffer = this.glassPool.getBuffer(
-			this.device,
-			this.glassData,
-		);
+		const glassBuffer = this.glassPool.getBuffer(this.device, this.glassData);
 
 		const modelBindGroup = this.device.createBindGroup({
 			layout: this.modelLayout,

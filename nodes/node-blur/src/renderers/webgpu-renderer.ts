@@ -1,6 +1,21 @@
 /// <reference types="webgpu" />
 import type { SignalData } from "@framefields/core";
-import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	unwrapFrameParam,
+	type WebGPUNodeRenderer,
+} from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	drawChildToTexture,
+	drawFullscreenPass,
+	drawTextureToTarget,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+	perDevice,
+	signalTextureView,
+	signalTiming,
+	texturesLayout,
+} from "@framefields/node-sdk/gpu";
 import { signalRegistry } from "@framefields/webgpu-renderers";
 import { MAX_BLUR } from "../shared/config.js";
 
@@ -125,27 +140,7 @@ fn applyPartialBlur(blurred: vec4<f32>, uv: vec2<f32>, dimensions: vec2<f32>) ->
 
 export const GAUSSIAN_BLUR_SHADER = `
 ${WGSL_BLUR_UNIFORMS}
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
 	let c = textureSampleLevel(tex, samp, in.uv, 0.0);
@@ -184,27 +179,7 @@ struct VSOut {
 
 export const BOX_BLUR_SHADER = `
 ${WGSL_BLUR_UNIFORMS}
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
 	let c = textureSampleLevel(tex, samp, in.uv, 0.0);
@@ -238,32 +213,12 @@ struct VSOut {
 
 export const MEDIAN_BLUR_SHADER = `
 ${WGSL_BLUR_UNIFORMS}
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
 struct Val {
 	luma  : f32,
 	color : vec4<f32>,
 };
 
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
 	let centerCol = textureSampleLevel(tex, samp, in.uv, 0.0);
@@ -316,27 +271,7 @@ struct Val {
 
 export const MOTION_BLUR_SHADER = `
 ${WGSL_BLUR_UNIFORMS}
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
 	let c = textureSampleLevel(tex, samp, in.uv, 0.0);
@@ -373,27 +308,7 @@ struct VSOut {
 
 export const BILATERAL_BLUR_SHADER = `
 ${WGSL_BLUR_UNIFORMS}
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
 	let centerCol = textureSampleLevel(tex, samp, in.uv, 0.0);
@@ -445,27 +360,7 @@ struct VSOut {
 
 export const EDGE_PRESERVING_SHADER = `
 ${WGSL_BLUR_UNIFORMS}
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
 	let centerCol = textureSampleLevel(tex, samp, in.uv, 0.0);
@@ -544,27 +439,7 @@ struct VSOut {
 
 export const RADIAL_BLUR_SHADER = `
 ${WGSL_BLUR_UNIFORMS}
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
 	let centerCol = textureSampleLevel(tex, samp, in.uv, 0.0);
@@ -612,27 +487,7 @@ struct VSOut {
 
 export const ZOOM_BLUR_SHADER = `
 ${WGSL_BLUR_UNIFORMS}
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
 	let centerCol = textureSampleLevel(tex, samp, in.uv, 0.0);
@@ -672,93 +527,16 @@ struct VSOut {
 }
 `;
 
-interface DeviceBlurResources {
-	blurUniformLayout: GPUBindGroupLayout;
-	singleTextureLayout: GPUBindGroupLayout;
-	signalTextureLayout: GPUBindGroupLayout;
-	pipelineCache: Map<string, GPURenderPipeline>;
-}
-
-const deviceResourceCache = new WeakMap<GPUDevice, DeviceBlurResources>();
-
-function getDeviceLayouts(device: GPUDevice): DeviceBlurResources {
-	let res = deviceResourceCache.get(device);
-	if (res) return res;
-
-	const blurUniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
-
-	const singleTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-			{
-				binding: 2,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-		],
-	});
-
-	const signalTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 2,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 3,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 4,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 5,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-
-	res = {
-		blurUniformLayout,
-		singleTextureLayout,
-		signalTextureLayout,
-		pipelineCache: new Map(),
-	};
-	deviceResourceCache.set(device, res);
-	return res;
-}
+const getDeviceLayouts = perDevice((device) => ({
+	blurUniformLayout: fragmentBindGroupLayout(device, ["uniform"]),
+	singleTextureLayout: fragmentBindGroupLayout(device, [
+		"texture",
+		"sampler",
+		"texture",
+	]),
+	signalTextureLayout: texturesLayout(device, 5),
+	pipelineCache: new Map<string, GPURenderPipeline>(),
+}));
 
 function getBlurResources(
 	device: GPUDevice,
@@ -792,22 +570,15 @@ function getBlurResources(
 			code,
 		});
 
-		pipeline = device.createRenderPipeline({
+		pipeline = createFullscreenPipeline(device, {
 			label: `BlurPipeline_${blurType}_${format}`,
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [
-					layouts.blurUniformLayout,
-					layouts.singleTextureLayout,
-					layouts.signalTextureLayout,
-				],
-			}),
-			vertex: { module: blurModule, entryPoint: "vs" },
-			fragment: {
-				module: blurModule,
-				entryPoint: "fs",
-				targets: [{ format }],
-			},
-			primitive: { topology: "triangle-strip" },
+			module: blurModule,
+			layouts: [
+				layouts.blurUniformLayout,
+				layouts.singleTextureLayout,
+				layouts.signalTextureLayout,
+			],
+			format,
 		});
 		layouts.pipelineCache.set(cacheKey, pipeline);
 	}
@@ -825,12 +596,10 @@ export const BlurWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		ctx,
 		encoder,
 		pass,
-		targetView,
 		targetTexture,
 		targetWidth,
 		targetHeight,
 		props,
-		drawChild,
 	} = args;
 	const frame = props.frame ?? 0;
 	const compositionFrame = props.compositionFrame ?? frame;
@@ -895,36 +664,16 @@ export const BlurWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 				val = Math.max(minVal, Math.min(maxVal, rawVal));
 				if (scaleByDpi) val *= dpiScale;
 			} else {
-				let rawVal = op[configKey] as unknown;
-				if (rawVal !== undefined && rawVal !== null) {
-					if (typeof rawVal === "object") {
-						if (
-							"get" in (rawVal as Record<string, unknown>) &&
-							typeof (rawVal as Record<string, unknown>).get === "function"
-						) {
-							rawVal = (
-								rawVal as {
-									get: (ctx: { frame: number; fps: number }) => unknown;
-								}
-							).get({ frame: compositionFrame, fps });
-						} else if ("value" in (rawVal as Record<string, unknown>)) {
-							const sig = rawVal as {
-								value: unknown;
-								gpuBinding?: { textureView?: GPUTextureView };
-							};
-							if (sig.gpuBinding?.textureView) {
-								gpuTextureView = sig.gpuBinding.textureView;
-								hasStaticSig = true;
-							}
-							rawVal = sig.value;
-						}
-					} else if (typeof rawVal === "function") {
-						rawVal = (rawVal as (f: number, fps: number) => unknown)(
-							compositionFrame,
-							fps,
-						);
-					}
+				const unwrapped = unwrapFrameParam(
+					op[configKey],
+					compositionFrame,
+					fps,
+				);
+				if (unwrapped.gpuTextureView) {
+					gpuTextureView = unwrapped.gpuTextureView;
+					hasStaticSig = true;
 				}
+				const rawVal = unwrapped.value;
 				const numVal = Number(rawVal ?? defaultValue);
 				val = Math.max(
 					minVal,
@@ -949,35 +698,7 @@ export const BlurWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const radiusRes = resolveBindable("radius", 0.3, 0.001, 1.0, false);
 	const radiusYRes = resolveBindable("radiusY", 0.0, 0.0, 1.0, false);
 
-	const tmpTex = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const tmpView = tmpTex.createView();
-
-	// Clear intermediate texture
-	const childPass = ctx.renderer.beginFrame(
-		encoder,
-		tmpView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	childPass.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		childMedia,
-		{ ...props, virtualMedia: childMedia },
-		tmpView,
-		tmpTex,
-		width,
-		height,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	const { texture: tmpTex } = await drawChildToTexture(args, childMedia);
 
 	const blurType = op.blurType ?? "Gaussian";
 	const isSeparable =
@@ -997,13 +718,7 @@ export const BlurWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const sampler = ctx.renderer.samplerCache.getSampler(ctx.device);
 
 	// Fetch dynamic signal texture views on-demand
-	const elapsedSeconds =
-		props.elapsedMs !== undefined ? props.elapsedMs / 1000 : frame / fps;
-	const durationSeconds = props.virtualMedia?.metadata?.durationMs
-		? props.virtualMedia.metadata.durationMs / 1000
-		: props.durationMs !== undefined
-			? props.durationMs / 1000
-			: 0;
+	const { elapsedSeconds, durationSeconds } = signalTiming(props, frame, fps);
 
 	// Pre-extract audio features if any connected bindable signals use audio sources
 	for (const bindableRes of [
@@ -1023,6 +738,15 @@ export const BlurWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		}
 	}
 
+	const signalContext = {
+		args,
+		width,
+		height,
+		frame,
+		fps,
+		elapsedSeconds,
+		durationSeconds,
+	};
 	const getSignalView = (
 		res: {
 			val: number;
@@ -1031,27 +755,7 @@ export const BlurWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 			gpuTextureView?: GPUTextureView;
 		},
 		suffix: string,
-	) => {
-		if (res.gpuTextureView) {
-			return res.gpuTextureView;
-		}
-		if (res.hasStaticSig && res.sd) {
-			return signalRegistry.getOrCreate2DTextureView(
-				ctx.device,
-				encoder,
-				res.sd.nodeId ?? `${nodeId}_${suffix}`,
-				elapsedSeconds,
-				durationSeconds,
-				res.sd,
-				width,
-				height,
-				props.renderId,
-				frame,
-				fps,
-			);
-		}
-		return signalRegistry.getDummy1x1TextureView(ctx.device);
-	};
+	) => signalTextureView(signalContext, res, `${nodeId}_${suffix}`);
 
 	const strengthView = getSignalView(strengthRes, "strength_sig");
 	const sigmaColorView = getSignalView(sigmaColorRes, "sigmacolor_sig");
@@ -1114,27 +818,12 @@ export const BlurWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		blurData[8] = 0.0;
 		const hBuffer = ctx.renderer.getTemporaryBuffer(blurData);
 
-		const hPass = encoder.beginRenderPass({
-			colorAttachments: [
-				{
-					view: outTex1.createView(),
-					loadOp: "clear",
-					storeOp: "store",
-					clearValue: { r: 0, g: 0, b: 0, a: 0 },
-				},
-			],
-		});
-		hPass.setPipeline(pipeline);
-		hPass.setBindGroup(
-			0,
+		drawFullscreenPass(encoder, outTex1.createView(), pipeline, [
 			ctx.device.createBindGroup({
 				layout: uLayout,
 				entries: [{ binding: 0, resource: { buffer: hBuffer } }],
 			}),
-		);
-		hPass.setBindGroup(1, createBlurBindGroup1(tmpTex, tmpTex));
-		hPass.setBindGroup(
-			2,
+			createBlurBindGroup1(tmpTex, tmpTex),
 			ctx.device.createBindGroup({
 				layout: sigLayout,
 				entries: [
@@ -1146,9 +835,7 @@ export const BlurWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 					{ binding: 5, resource: sampler },
 				],
 			}),
-		);
-		hPass.draw(4);
-		hPass.end();
+		]);
 
 		// Pass 2: Vertical (applies partialBlur mask with original tmpTex)
 		blurData[0] = 0.0;
@@ -1156,27 +843,12 @@ export const BlurWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		blurData[8] = isPartial ? 1.0 : 0.0;
 		const vBuffer = ctx.renderer.getTemporaryBuffer(blurData);
 
-		const vPass = encoder.beginRenderPass({
-			colorAttachments: [
-				{
-					view: outTex2.createView(),
-					loadOp: "clear",
-					storeOp: "store",
-					clearValue: { r: 0, g: 0, b: 0, a: 0 },
-				},
-			],
-		});
-		vPass.setPipeline(pipeline);
-		vPass.setBindGroup(
-			0,
+		drawFullscreenPass(encoder, outTex2.createView(), pipeline, [
 			ctx.device.createBindGroup({
 				layout: uLayout,
 				entries: [{ binding: 0, resource: { buffer: vBuffer } }],
 			}),
-		);
-		vPass.setBindGroup(1, createBlurBindGroup1(outTex1, tmpTex));
-		vPass.setBindGroup(
-			2,
+			createBlurBindGroup1(outTex1, tmpTex),
 			ctx.device.createBindGroup({
 				layout: sigLayout,
 				entries: [
@@ -1188,9 +860,7 @@ export const BlurWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 					{ binding: 5, resource: sampler },
 				],
 			}),
-		);
-		vPass.draw(4);
-		vPass.end();
+		]);
 	} else {
 		// 1-Pass Filters (Motion, Edge-preserving, Radial, Zoom)
 		outTex2 = ctx.renderer.getTemporaryTexture(width, height, [
@@ -1204,27 +874,12 @@ export const BlurWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		blurData[8] = isPartial ? 1.0 : 0.0;
 		const singleBuffer = ctx.renderer.getTemporaryBuffer(blurData);
 
-		const singlePass = encoder.beginRenderPass({
-			colorAttachments: [
-				{
-					view: outTex2.createView(),
-					loadOp: "clear",
-					storeOp: "store",
-					clearValue: { r: 0, g: 0, b: 0, a: 0 },
-				},
-			],
-		});
-		singlePass.setPipeline(pipeline);
-		singlePass.setBindGroup(
-			0,
+		drawFullscreenPass(encoder, outTex2.createView(), pipeline, [
 			ctx.device.createBindGroup({
 				layout: uLayout,
 				entries: [{ binding: 0, resource: { buffer: singleBuffer } }],
 			}),
-		);
-		singlePass.setBindGroup(1, createBlurBindGroup1(tmpTex, tmpTex));
-		singlePass.setBindGroup(
-			2,
+			createBlurBindGroup1(tmpTex, tmpTex),
 			ctx.device.createBindGroup({
 				layout: sigLayout,
 				entries: [
@@ -1236,26 +891,9 @@ export const BlurWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 					{ binding: 5, resource: sampler },
 				],
 			}),
-		);
-		singlePass.draw(4);
-		singlePass.end();
+		]);
 	}
 
 	// Final Pass: Draw result to targetView using standard drawTexture for blending/opacity
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		targetWidth,
-		targetHeight,
-		"load",
-	);
-	ctx.renderer.drawTexture(
-		finalPass,
-		outTex2,
-		{ x: 0, y: 0, width: targetWidth, height: targetHeight },
-		{ opacity: op.opacity ?? 1 },
-	);
-
-	args.pass = finalPass;
+	drawTextureToTarget(args, outTex2, op.opacity ?? 1);
 };

@@ -1,5 +1,11 @@
 /// <reference types="webgpu" />
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+	perDevice,
+} from "@framefields/node-sdk/gpu";
 import type { CanvasGeneratorNodeConfig } from "../shared/config.js";
 
 const CANVAS_SHADER = `
@@ -16,27 +22,7 @@ struct CanvasUniforms {
 };
 
 @group(0) @binding(0) var<uniform> u : CanvasUniforms;
-
-struct VSOut {
-    @builtin(position) pos : vec4<f32>,
-    @location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-    var pos = array<vec2<f32>, 4>(
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(1.0, -1.0)
-    );
-    var uv = array<vec2<f32>, 4>(
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(1.0, 0.0),
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 1.0)
-    );
-    return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
     if (u.fillType < 0.5) {
@@ -58,35 +44,12 @@ struct VSOut {
 }
 `;
 
-interface DeviceCanvasResources {
-	uniformLayout: GPUBindGroupLayout;
-	pipelineCache: Map<string, GPURenderPipeline>;
-}
-
-const deviceResourceCache = new WeakMap<GPUDevice, DeviceCanvasResources>();
 const canvasUniformData = new Float32Array(20);
 
-function getDeviceLayouts(device: GPUDevice): DeviceCanvasResources {
-	let res = deviceResourceCache.get(device);
-	if (res) return res;
-
-	const uniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
-
-	res = {
-		uniformLayout,
-		pipelineCache: new Map(),
-	};
-	deviceResourceCache.set(device, res);
-	return res;
-}
+const getDeviceLayouts = perDevice((device) => ({
+	uniformLayout: fragmentBindGroupLayout(device, ["uniform"]),
+	pipelineCache: new Map<string, GPURenderPipeline>(),
+}));
 
 function getCanvasResources(device: GPUDevice, format: GPUTextureFormat) {
 	const layouts = getDeviceLayouts(device);
@@ -99,18 +62,11 @@ function getCanvasResources(device: GPUDevice, format: GPUTextureFormat) {
 			code: CANVAS_SHADER,
 		});
 
-		pipeline = device.createRenderPipeline({
+		pipeline = createFullscreenPipeline(device, {
 			label: `CanvasGeneratorPipeline_${format}`,
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [layouts.uniformLayout],
-			}),
-			vertex: { module: canvasModule, entryPoint: "vs" },
-			fragment: {
-				module: canvasModule,
-				entryPoint: "fs",
-				targets: [{ format }],
-			},
-			primitive: { topology: "triangle-strip" },
+			module: canvasModule,
+			layouts: [layouts.uniformLayout],
+			format,
 		});
 		layouts.pipelineCache.set(cacheKey, pipeline);
 	}

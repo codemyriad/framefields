@@ -1,7 +1,19 @@
 /// <reference types="webgpu" />
 import type { SignalData, VirtualMediaData } from "@framefields/core";
-import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
-import { signalRegistry as globalSignalRegistry } from "@framefields/webgpu-renderers";
+import {
+	unwrapFrameParam,
+	type WebGPUNodeRenderer,
+} from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	drawChildToTexture,
+	drawFullscreenPass,
+	drawTextureToTarget,
+	fragmentBindGroupLayout,
+	signalTextureView,
+	signalTiming,
+	texturesLayout,
+} from "@framefields/node-sdk/gpu";
 import {
 	MAX_FEATHER,
 	MAX_OFFSET,
@@ -216,85 +228,11 @@ function getDeviceResources(
 	let res = deviceResourceCache.get(device);
 	if (res) return res;
 
-	const uniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
+	const uniformLayout = fragmentBindGroupLayout(device, ["uniform"]);
 
-	const textureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 2,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
+	const textureLayout = texturesLayout(device, 2);
 
-	const signalTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 2,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 3,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 4,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 5,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 6,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 7,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 8,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
+	const signalTextureLayout = texturesLayout(device, 8);
 
 	const shaderModule = device.createShaderModule({
 		code: `${WGSL_FULLSCREEN_VS}\n${WGSL_PATCHHEAL_FS}`,
@@ -304,31 +242,16 @@ function getDeviceResources(
 		bindGroupLayouts: [uniformLayout, textureLayout, signalTextureLayout],
 	});
 
-	const pipeline = device.createRenderPipeline({
-		layout: pipelineLayout,
-		vertex: { module: shaderModule, entryPoint: "vs_main" },
-		fragment: {
-			module: shaderModule,
-			entryPoint: "fs_main",
-			targets: [
-				{
-					format,
-					blend: {
-						color: {
-							srcFactor: "one",
-							dstFactor: "zero",
-							operation: "add",
-						},
-						alpha: {
-							srcFactor: "one",
-							dstFactor: "zero",
-							operation: "add",
-						},
-					},
-				},
-			],
+	const pipeline = createFullscreenPipeline(device, {
+		module: shaderModule,
+		layouts: pipelineLayout,
+		format,
+		blend: {
+			color: { srcFactor: "one", dstFactor: "zero", operation: "add" },
+			alpha: { srcFactor: "one", dstFactor: "zero", operation: "add" },
 		},
-		primitive: { topology: "triangle-strip" },
+		vertexEntryPoint: "vs_main",
+		fragmentEntryPoint: "fs_main",
 	});
 
 	res = {
@@ -360,12 +283,10 @@ export const PatchHealWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		ctx,
 		encoder,
 		pass,
-		targetView,
 		targetTexture,
 		targetWidth,
 		targetHeight,
 		props,
-		drawChild,
 	} = args;
 
 	const op = props.virtualMedia?.operation as unknown as
@@ -385,80 +306,31 @@ export const PatchHealWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const fps = props.fps || 30;
 	const nodeId = op.inputs ? Object.keys(op.inputs)[0] : "patch_heal_node";
 
-	const signalRegistry = globalSignalRegistry;
-
 	// 1. Draw source child media into tmpSrcTex
-	const tmpSrcTex = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const tmpSrcView = tmpSrcTex.createView();
-
-	const srcClearPass = ctx.renderer.beginFrame(
-		encoder,
-		tmpSrcView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	srcClearPass.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
+	const { texture: tmpSrcTex, view: tmpSrcView } = await drawChildToTexture(
+		args,
 		childMedia,
 		{
-			...props,
-			virtualMedia: childMedia,
-			renderId: `${props.renderId}-src`,
-			excludeTextures: [...(props.excludeTextures || []), tmpSrcTex],
+			props: {
+				...props,
+				virtualMedia: childMedia,
+				renderId: `${props.renderId}-src`,
+			},
 		},
-		tmpSrcView,
-		tmpSrcTex,
-		width,
-		height,
 	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
 
 	// 2. Draw optional mask child media into maskTex if present
 	let maskTex: GPUTexture | null = null;
 	if (op.maskMedia) {
-		maskTex = ctx.renderer.getTemporaryTexture(width, height, [
-			...(props.excludeTextures || []),
-			targetTexture,
-			tmpSrcTex,
-		]);
-		const maskView = maskTex.createView();
-
-		const maskClearPass = ctx.renderer.beginFrame(
-			encoder,
-			maskView,
-			{ r: 0, g: 0, b: 0, a: 0 },
-			width,
-			height,
-			"clear",
-		);
-		maskClearPass.end();
-
-		ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-		ctx.renderer.pushIdentity();
-		await drawChild(
-			op.maskMedia,
-			{
+		({ texture: maskTex } = await drawChildToTexture(args, op.maskMedia, {
+			props: {
 				...props,
 				virtualMedia: op.maskMedia,
 				renderId: `${props.renderId}-mask`,
-				excludeTextures: [...(props.excludeTextures || []), tmpSrcTex, maskTex],
+				excludeTextures: [...(props.excludeTextures || []), tmpSrcTex],
 			},
-			maskView,
-			maskTex,
-			width,
-			height,
-		);
-		ctx.renderer.popTransform();
-		ctx.renderer.popScissor();
+			exclude: [tmpSrcTex],
+		}));
 	}
 
 	// 3. Compile pipeline resources
@@ -471,13 +343,7 @@ export const PatchHealWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 
 	const sampler = ctx.renderer.samplerCache.getSampler(ctx.device);
 
-	const elapsedSeconds =
-		props.elapsedMs !== undefined ? props.elapsedMs / 1000 : frame / fps;
-	const durationSeconds = props.virtualMedia?.metadata?.durationMs
-		? props.virtualMedia.metadata.durationMs / 1000
-		: props.durationMs !== undefined
-			? props.durationMs / 1000
-			: 0;
+	const { elapsedSeconds, durationSeconds } = signalTiming(props, frame, fps);
 
 	const patches = normalizePatches(op);
 
@@ -526,28 +392,11 @@ export const PatchHealWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 							fallbackVal);
 				val = Math.max(minVal, Math.min(maxVal, Number(numVal)));
 			} else {
-				let rawVal = fallbackVal as unknown;
-				if (rawVal !== undefined && rawVal !== null) {
-					if (typeof rawVal === "object") {
-						if (
-							"get" in (rawVal as Record<string, unknown>) &&
-							typeof (rawVal as Record<string, unknown>).get === "function"
-						) {
-							rawVal = (
-								rawVal as {
-									get: (ctx: { frame: number; fps: number }) => unknown;
-								}
-							).get({ frame: compositionFrame, fps });
-						} else if ("value" in (rawVal as Record<string, unknown>)) {
-							rawVal = (rawVal as { value: unknown }).value;
-						}
-					} else if (typeof rawVal === "function") {
-						rawVal = (rawVal as (f: number, fps: number) => unknown)(
-							compositionFrame,
-							fps,
-						);
-					}
-				}
+				const rawVal = unwrapFrameParam(
+					fallbackVal,
+					compositionFrame,
+					fps,
+				).value;
 				const numVal = Number(rawVal ?? fallbackVal);
 				val = Math.max(
 					minVal,
@@ -622,6 +471,15 @@ export const PatchHealWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 			? resolveBindable("opacity", patch.opacity, 0.0, 1.0)
 			: { val: patch.opacity, hasStaticSig: false, sd: null };
 
+		const signalContext = {
+			args,
+			width,
+			height,
+			frame,
+			fps,
+			elapsedSeconds,
+			durationSeconds,
+		};
 		const getSignalView = (
 			res: {
 				val: number;
@@ -629,26 +487,7 @@ export const PatchHealWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 				sd: PatchHealSignalData | null;
 			},
 			suffix: string,
-		) => {
-			if (res.hasStaticSig && res.sd && signalRegistry) {
-				return signalRegistry.getOrCreate2DTextureView(
-					ctx.device,
-					encoder,
-					res.sd.nodeId ?? `${nodeId}_${suffix}`,
-					elapsedSeconds,
-					durationSeconds,
-					res.sd,
-					width,
-					height,
-					props.renderId,
-					frame,
-					fps,
-				);
-			}
-			return signalRegistry
-				? signalRegistry.getDummy1x1TextureView(ctx.device)
-				: tmpSrcView;
-		};
+		) => signalTextureView(signalContext, res, `${nodeId}_${suffix}`);
 
 		const offsetXView = getSignalView(offsetXRes, "offsetX_sig");
 		const offsetYView = getSignalView(offsetYRes, "offsetY_sig");
@@ -720,49 +559,18 @@ export const PatchHealWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 			],
 		});
 
-		const healPass = encoder.beginRenderPass({
-			colorAttachments: [
-				{
-					view: destinationTex.createView(),
-					loadOp: "clear",
-					storeOp: "store",
-					clearValue: { r: 0, g: 0, b: 0, a: 0 },
-				},
-			],
-		});
-
-		healPass.setPipeline(pipeline);
-		healPass.setBindGroup(
-			0,
+		drawFullscreenPass(encoder, destinationTex.createView(), pipeline, [
 			ctx.device.createBindGroup({
 				layout: uLayout,
 				entries: [{ binding: 0, resource: { buffer: uBuffer } }],
 			}),
-		);
-		healPass.setBindGroup(1, texBindGroup);
-		healPass.setBindGroup(2, sigBindGroup);
-		healPass.draw(4);
-		healPass.end();
+			texBindGroup,
+			sigBindGroup,
+		]);
 
 		currentInputTex = destinationTex;
 	}
 
 	// Final blit to targetView
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"load",
-	);
-
-	ctx.renderer.drawTexture(
-		finalPass,
-		currentInputTex,
-		{ x: 0, y: 0, width, height },
-		{ opacity: 1.0 },
-	);
-
-	args.pass = finalPass;
+	drawTextureToTarget(args, currentInputTex);
 };

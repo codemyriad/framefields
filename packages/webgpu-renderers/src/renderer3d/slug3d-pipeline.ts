@@ -3,7 +3,11 @@ import { BufferPool } from "../renderer2d/buffer-pool.js";
 import { slug3dWgsl } from "../shaders/slug3d.js";
 import type { SlugFont } from "../slug/slug-loader.js";
 import { fullCoverageView, matteLayoutEntry } from "./matte3d.js";
-import { BloomPipelineVariants } from "./pipeline-variants.js";
+import {
+	BloomPipelineVariants,
+	createBasePipelines,
+	type PipelineVariantBase,
+} from "./pipeline-variants.js";
 import {
 	type MaterialUniformData,
 	packMaterialParams,
@@ -120,18 +124,6 @@ export class Slug3DPipeline {
 			],
 		};
 
-		const blend: GPUBlendState = {
-			color: {
-				srcFactor: "one",
-				dstFactor: "one-minus-src-alpha",
-				operation: "add",
-			},
-			alpha: {
-				srcFactor: "one",
-				dstFactor: "one-minus-src-alpha",
-				operation: "add",
-			},
-		};
 		const depthStencil: GPUDepthStencilState = {
 			format: depthFormat,
 			depthWriteEnabled: true,
@@ -143,35 +135,7 @@ export class Slug3DPipeline {
 		};
 		const multisample: GPUMultisampleState = { count: sampleCount };
 
-		this.pipelineSingle = device.createRenderPipeline({
-			label: "Slug3DPipelineSingle",
-			layout,
-			vertex,
-			fragment: {
-				module,
-				entryPoint: "fs_single",
-				targets: [{ format, blend }],
-			},
-			depthStencil,
-			primitive,
-			multisample,
-		});
-
-		this.pipelineMrt = device.createRenderPipeline({
-			label: "Slug3DPipelineMrt",
-			layout,
-			vertex,
-			fragment: {
-				module,
-				entryPoint: "fs_mrt",
-				targets: [{ format, blend }, { format: "rgba16float" }],
-			},
-			depthStencil,
-			primitive,
-			multisample,
-		});
-
-		this.bloomVariants = new BloomPipelineVariants(device, {
+		const base: PipelineVariantBase = {
 			label: "Slug3DPipeline",
 			layout,
 			vertex,
@@ -180,7 +144,11 @@ export class Slug3DPipeline {
 			depthStencil,
 			primitive,
 			multisample,
-		});
+		};
+		const { single, mrt } = createBasePipelines(device, base);
+		this.pipelineSingle = single;
+		this.pipelineMrt = mrt;
+		this.bloomVariants = new BloomPipelineVariants(device, base);
 	}
 
 	resetPools(): void {

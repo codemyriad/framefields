@@ -1,5 +1,6 @@
 import {
 	type AudioProcessor,
+	isHandleConnected,
 	resolveBoolean,
 	resolveNumber,
 } from "@framefields/node-sdk";
@@ -183,11 +184,6 @@ export const delayAudioProcessor: AudioProcessor = async (
 	}
 
 	const op = (virtualMedia.operation as Record<string, unknown>) || {};
-	const inputs =
-		(op.inputs as Record<
-			string,
-			{ connectionValid?: boolean; outputItem?: { type?: string } }
-		>) || {};
 
 	const numChannels = channels.length;
 	if (numChannels === 0) return;
@@ -207,22 +203,12 @@ export const delayAudioProcessor: AudioProcessor = async (
 	const dryInternal = Math.max(0.0, Math.min(resolveNumber(op.dry, 1.0), 1.0));
 	const pingPongInternal = resolveBoolean(op.pingPong, false);
 
-	const isHandleConnected = (handleIdKey: string): boolean => {
-		const handleId = op[handleIdKey];
-		if (typeof handleId !== "string" || !handleId) return false;
-		const input = inputs[handleId];
-		return Boolean(
-			input?.connectionValid &&
-				input.outputItem &&
-				(input.outputItem.type === "Signal" ||
-					input.outputItem.type === "Number"),
-		);
-	};
-
-	const hasDelayTimeSig = isHandleConnected("delayTimeHandleId") ? 1.0 : 0.0;
-	const hasFeedbackSig = isHandleConnected("feedbackHandleId") ? 1.0 : 0.0;
-	const hasWetSig = isHandleConnected("wetHandleId") ? 1.0 : 0.0;
-	const hasDrySig = isHandleConnected("dryHandleId") ? 1.0 : 0.0;
+	const hasDelayTimeSig = isHandleConnected(op, "delayTimeHandleId")
+		? 1.0
+		: 0.0;
+	const hasFeedbackSig = isHandleConnected(op, "feedbackHandleId") ? 1.0 : 0.0;
+	const hasWetSig = isHandleConnected(op, "wetHandleId") ? 1.0 : 0.0;
+	const hasDrySig = isHandleConnected(op, "dryHandleId") ? 1.0 : 0.0;
 
 	// Allocate max possible delay buffer (5 seconds) to allow smooth dynamic modulation
 	const maxDelaySec = 5.0;

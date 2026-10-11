@@ -1,4 +1,5 @@
 /// <reference types="webgpu" />
+
 import { resolveMediaSourceUrl } from "@framefields/client-utils";
 import { decodeAudioSource } from "@framefields/compositions";
 import {
@@ -14,7 +15,17 @@ import {
 	getActiveMediaMetadata,
 	type VirtualMediaData,
 } from "@framefields/core";
-import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	resolveFrameNumber,
+	solveHomography,
+	type WebGPUNodeRenderer,
+} from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+	PREMULTIPLIED_BLEND,
+} from "@framefields/node-sdk/gpu";
 import { measureText } from "@framefields/renderers";
 import { TemporalDeflickerPipeline } from "@framefields/tensor-webgpu";
 import {
@@ -53,17 +64,11 @@ import {
 	srtLoader,
 	Vector3Math,
 } from "@framefields/webgpu-renderers";
-
 import { compileTimeline } from "../shared/compiler.js";
 import type { CompositorOperation } from "../shared/config.js";
 import { shouldPaintContainerBackground } from "./container-bg.js";
 import { buildLayerMatrix, toDOMMatrix } from "./transform.js";
-import {
-	has3DTransform,
-	type Quad2D,
-	solveHomography,
-	Transform3DMath,
-} from "./transform3d.js";
+import { has3DTransform, type Quad2D, Transform3DMath } from "./transform3d.js";
 
 // Layout depends on the document tree (whose `children` array keeps its
 // identity between frames), the viewport, media sizes and the few layout
@@ -109,27 +114,7 @@ struct HomographyUniforms {
 @group(0) @binding(0) var<uniform> u : HomographyUniforms;
 @group(1) @binding(0) var tex        : texture_2d<f32>;
 @group(1) @binding(1) var samp       : sampler;
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
 	let x = in.uv.x;
@@ -169,69 +154,24 @@ function getHomographyResources(
 ): DeviceHomographyResources {
 	let res = deviceHomographyCache.get(device);
 	if (!res) {
-		const uniformLayout = device.createBindGroupLayout({
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.FRAGMENT,
-					buffer: { type: "uniform" },
-				},
-			],
-		});
+		const uniformLayout = fragmentBindGroupLayout(device, ["uniform"]);
 
-		const textureLayout = device.createBindGroupLayout({
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.FRAGMENT,
-					texture: { sampleType: "float" },
-				},
-				{
-					binding: 1,
-					visibility: GPUShaderStage.FRAGMENT,
-					sampler: { type: "filtering" },
-				},
-			],
-		});
+		const textureLayout = fragmentBindGroupLayout(device, [
+			"texture",
+			"sampler",
+		]);
 
 		const module = device.createShaderModule({
 			label: "compositor_homography.wgsl",
 			code: compositorHomographyWgsl,
 		});
 
-		const pipeline = device.createRenderPipeline({
+		const pipeline = createFullscreenPipeline(device, {
 			label: "CompositorHomographyPipeline",
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [uniformLayout, textureLayout],
-			}),
-			vertex: {
-				module,
-				entryPoint: "vs",
-			},
-			fragment: {
-				module,
-				entryPoint: "fs",
-				targets: [
-					{
-						format,
-						blend: {
-							color: {
-								srcFactor: "one",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-							alpha: {
-								srcFactor: "one",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-						},
-					},
-				],
-			},
-			primitive: {
-				topology: "triangle-strip",
-			},
+			module,
+			layouts: [uniformLayout, textureLayout],
+			format,
+			blend: PREMULTIPLIED_BLEND,
 		});
 
 		res = { pipeline, uniformLayout, textureLayout };
@@ -302,52 +242,6 @@ function getTemporalDeflickerPipeline(
 	return pipe;
 }
 
-function resolveVal(
-	val: unknown,
-	fallback: number,
-	frame: number,
-	fps: number,
-): number {
-	if (val === undefined || val === null) return fallback;
-	if (typeof val === "number") return Number.isFinite(val) ? val : fallback;
-	if (typeof val === "object" && val !== null) {
-		if (
-			"get" in (val as Record<string, unknown>) &&
-			typeof (val as { get: unknown }).get === "function"
-		) {
-			try {
-				const res = (val as { get: (ctx?: unknown) => unknown }).get({
-					frame,
-					fps,
-					time: fps > 0 ? frame / fps : 0,
-					duration: 0,
-					durationMs: 0,
-					progress: 0,
-					deltaTime: fps > 0 ? 1 / fps : 0,
-				});
-				const n = Number(res);
-				if (Number.isFinite(n)) return n;
-			} catch {
-				// fallback
-			}
-		}
-		if ("value" in (val as Record<string, unknown>)) {
-			const n = Number((val as { value: unknown }).value);
-			if (Number.isFinite(n)) return n;
-		}
-	}
-	if (typeof val === "function") {
-		try {
-			const n = Number(val({ frame, fps, time: fps > 0 ? frame / fps : 0 }));
-			if (Number.isFinite(n)) return n;
-		} catch {
-			// fallback
-		}
-	}
-	const n = Number(val);
-	return Number.isFinite(n) ? n : fallback;
-}
-
 function synthesizeRelightLights(
 	relightOpts: Record<string, unknown>,
 	sceneLights: Light3DOptions[],
@@ -373,12 +267,27 @@ function synthesizeRelightLights(
 				: "point";
 
 	const rawIntensity = relightOpts.intensity ?? 1.0;
-	const intensity = resolveVal(rawIntensity, 1.0, shiftedFrame, fps);
+	const intensity = resolveFrameNumber(rawIntensity, 1.0, shiftedFrame, fps);
 
-	const normX = resolveVal(relightOpts.lightPosX, 0.5, shiftedFrame, fps);
-	const normY = resolveVal(relightOpts.lightPosY, 0.5, shiftedFrame, fps);
-	const normZ = resolveVal(relightOpts.lightPosZ, 0.25, shiftedFrame, fps);
-	const normRadius = resolveVal(
+	const normX = resolveFrameNumber(
+		relightOpts.lightPosX,
+		0.5,
+		shiftedFrame,
+		fps,
+	);
+	const normY = resolveFrameNumber(
+		relightOpts.lightPosY,
+		0.5,
+		shiftedFrame,
+		fps,
+	);
+	const normZ = resolveFrameNumber(
+		relightOpts.lightPosZ,
+		0.25,
+		shiftedFrame,
+		fps,
+	);
+	const normRadius = resolveFrameNumber(
 		relightOpts.lightRadius,
 		0.75,
 		shiftedFrame,
@@ -401,7 +310,7 @@ function synthesizeRelightLights(
 		decay: 1.0,
 	};
 
-	const ambientInt = resolveVal(
+	const ambientInt = resolveFrameNumber(
 		relightOpts.ambientIntensity,
 		0.15,
 		shiftedFrame,
@@ -1452,11 +1361,12 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 						activeExcludes = [...activeExcludes, coverage];
 						nodeIndex += 1;
 						if (mode !== "alpha") {
-							const white = ctx.renderer.getTemporaryTexture(
-								targetW,
-								targetH,
-								[targetTexture, activeTex, ...activeExcludes, ...pendingTextures()],
-							);
+							const white = ctx.renderer.getTemporaryTexture(targetW, targetH, [
+								targetTexture,
+								activeTex,
+								...activeExcludes,
+								...pendingTextures(),
+							]);
 							ctx.renderer
 								.beginFrame(
 									encoder,
@@ -1467,13 +1377,19 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 									"clear",
 								)
 								.end();
-							coverage = ctx.renderer.composite(encoder, white, coverage, blend, [
-								targetTexture,
-								activeTex,
-								...activeExcludes,
-								...pendingTextures(),
+							coverage = ctx.renderer.composite(
+								encoder,
 								white,
-							]);
+								coverage,
+								blend,
+								[
+									targetTexture,
+									activeTex,
+									...activeExcludes,
+									...pendingTextures(),
+									white,
+								],
+							);
 							activeExcludes = [...activeExcludes, coverage];
 						}
 						const before = pending3DItems.length;
@@ -1581,10 +1497,7 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		> => {
 			// Textures queued for the pending 3D flush are still live: a later
 			// layer of the same size must not be handed one from the pool.
-			const excludes = [
-				...baseExcludes,
-				...pendingTextures(),
-			];
+			const excludes = [...baseExcludes, ...pendingTextures()];
 			const lop = nodeVM.operation as any;
 			if (lop.kind === "camera" || lop.kind === "light") return;
 			const targetId = lop.id || lop.inputHandleId;
@@ -3043,7 +2956,7 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 							viewportHeight: targetH,
 							layerX: 0,
 							layerY: 0,
-							roughness: resolveVal(
+							roughness: resolveFrameNumber(
 								target?.roughness ??
 									target?.relightRoughness ??
 									relightOpts.specularRoughness ??
@@ -3052,7 +2965,7 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 								compositionFrame,
 								fps ?? 24,
 							),
-							specularStrength: resolveVal(
+							specularStrength: resolveFrameNumber(
 								target?.specularStrength ??
 									target?.relightSpecularStrength ??
 									relightOpts.specularStrength,
@@ -3060,7 +2973,7 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 								compositionFrame,
 								fps ?? 24,
 							),
-							metallic: resolveVal(
+							metallic: resolveFrameNumber(
 								target?.metallic ??
 									target?.relightMetallic ??
 									relightOpts.metallic,
@@ -3068,7 +2981,7 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 								compositionFrame,
 								fps ?? 24,
 							),
-							ambientIntensity: resolveVal(
+							ambientIntensity: resolveFrameNumber(
 								target?.ambientIntensity ??
 									target?.relightAmbientIntensity ??
 									relightOpts.ambientIntensity,
@@ -3076,7 +2989,7 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 								compositionFrame,
 								fps ?? 24,
 							),
-							depthScale: resolveVal(
+							depthScale: resolveFrameNumber(
 								target?.depthScale ??
 									target?.relightDepthScale ??
 									relightOpts.depthScale,
@@ -3694,7 +3607,7 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 						viewportHeight: texH,
 						layerX: sampledX,
 						layerY: sampledY,
-						roughness: resolveVal(
+						roughness: resolveFrameNumber(
 							target?.roughness ??
 								target?.relightRoughness ??
 								relightOpts.specularRoughness ??
@@ -3703,7 +3616,7 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 							compositionFrame,
 							fps ?? 24,
 						),
-						specularStrength: resolveVal(
+						specularStrength: resolveFrameNumber(
 							target?.specularStrength ??
 								target?.relightSpecularStrength ??
 								relightOpts.specularStrength,
@@ -3711,7 +3624,7 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 							compositionFrame,
 							fps ?? 24,
 						),
-						metallic: resolveVal(
+						metallic: resolveFrameNumber(
 							target?.metallic ??
 								target?.relightMetallic ??
 								relightOpts.metallic,
@@ -3719,7 +3632,7 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 							compositionFrame,
 							fps ?? 24,
 						),
-						ambientIntensity: resolveVal(
+						ambientIntensity: resolveFrameNumber(
 							target?.ambientIntensity ??
 								target?.relightAmbientIntensity ??
 								relightOpts.ambientIntensity,
@@ -3727,7 +3640,7 @@ export const CompositorWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 							compositionFrame,
 							fps ?? 24,
 						),
-						depthScale: resolveVal(
+						depthScale: resolveFrameNumber(
 							target?.depthScale ??
 								target?.relightDepthScale ??
 								relightOpts.depthScale,

@@ -83,6 +83,201 @@ export {
 	resolveString,
 } from "@framefields/core";
 
+/**
+ * A numeric node parameter at `frame`: a number, a signal-like `get(ctx)` or
+ * `{ value }`, a `(ctx) => number` function, or anything `Number()` accepts;
+ * `fallback` when none of those yields a finite number.
+ */
+export function resolveFrameNumber(
+	val: unknown,
+	fallback: number,
+	frame: number,
+	fps: number,
+): number {
+	if (val === undefined || val === null) return fallback;
+	if (typeof val === "number") return Number.isFinite(val) ? val : fallback;
+	if (typeof val === "object" && val !== null) {
+		if (
+			"get" in (val as Record<string, unknown>) &&
+			typeof (val as { get: unknown }).get === "function"
+		) {
+			try {
+				const res = (val as { get: (ctx?: unknown) => unknown }).get({
+					frame,
+					fps,
+					time: fps > 0 ? frame / fps : 0,
+					duration: 0,
+					durationMs: 0,
+					progress: 0,
+					deltaTime: fps > 0 ? 1 / fps : 0,
+				});
+				const n = Number(res);
+				if (Number.isFinite(n)) return n;
+			} catch {
+				// fallback
+			}
+		}
+		if ("value" in (val as Record<string, unknown>)) {
+			const n = Number((val as { value: unknown }).value);
+			if (Number.isFinite(n)) return n;
+		}
+	}
+	if (typeof val === "function") {
+		try {
+			const n = Number(val({ frame, fps, time: fps > 0 ? frame / fps : 0 }));
+			if (Number.isFinite(n)) return n;
+		} catch {
+			// fallback
+		}
+	}
+	const n = Number(val);
+	return Number.isFinite(n) ? n : fallback;
+}
+
+/**
+ * A static node parameter at `frame`: calls `get(ctx)` / `(frame, fps)`
+ * functions and reads `{ value }` wrappers, keeping a signal's GPU texture
+ * binding when it has one. Anything else is returned as-is.
+ */
+export function unwrapFrameParam(
+	raw: unknown,
+	frame: number,
+	fps: number,
+): { value: unknown; gpuTextureView?: GPUTextureView } {
+	if (raw === undefined || raw === null) return { value: raw };
+	if (typeof raw === "function") {
+		return { value: (raw as (f: number, fps: number) => unknown)(frame, fps) };
+	}
+	if (typeof raw !== "object") return { value: raw };
+	const obj = raw as Record<string, unknown>;
+	if (typeof obj.get === "function") {
+		return {
+			value: (obj.get as (ctx: { frame: number; fps: number }) => unknown)({
+				frame,
+				fps,
+			}),
+		};
+	}
+	if ("value" in obj) {
+		const sig = raw as {
+			value: unknown;
+			gpuBinding?: { textureView?: GPUTextureView };
+		};
+		return { value: sig.value, gpuTextureView: sig.gpuBinding?.textureView };
+	}
+	return { value: raw };
+}
+
+/** The `inputs` map node operations carry: one entry per connected handle. */
+export type NodeOperationInputs = Record<
+	string,
+	{
+		connectionValid: boolean;
+		outputItem: { type: string; data: unknown } | null;
+	}
+>;
+
+export interface HandleParam<SD> {
+	val: number;
+	/** The value comes from a signal (`sd`) sampled on the GPU. */
+	hasStaticSig: boolean;
+	sd: SD | null;
+	handleId: string | null | undefined;
+}
+
+/**
+ * A numeric parameter fed through `handleId`: a connected Number (clamped), a
+ * connected Signal (sampled on the GPU, `val` stays `fallbackVal`), or else
+ * `fallbackVal` clamped to [clampMin, clampMax].
+ */
+export function resolveHandleParam<SD>(
+	inputs: NodeOperationInputs | undefined,
+	handleId: string | null | undefined,
+	fallbackVal: number,
+	clampMin: number,
+	clampMax: number,
+): HandleParam<SD> {
+	const clamp = (v: number) => Math.max(clampMin, Math.min(clampMax, v));
+	const input = handleId ? inputs?.[handleId] : undefined;
+	if (input?.connectionValid) {
+		const outputItem = input.outputItem;
+		if (outputItem?.type === "Number") {
+			const numVal =
+				typeof outputItem.data === "number"
+					? outputItem.data
+					: ((outputItem.data as { value?: number })?.value ?? fallbackVal);
+			return { val: clamp(numVal), hasStaticSig: false, sd: null, handleId };
+		}
+		if (outputItem?.type === "Signal" && outputItem.data) {
+			return {
+				val: fallbackVal,
+				hasStaticSig: true,
+				sd: outputItem.data as SD,
+				handleId,
+			};
+		}
+	}
+	return { val: clamp(fallbackVal), hasStaticSig: false, sd: null, handleId };
+}
+
+/**
+ * A numeric field `fieldName` of a node operation, fed through its
+ * `${fieldName}HandleId` input: a connected Signal/Numeric (`sd`, sampled on
+ * the GPU; `value` is its offset), a connected Number, or the operation's own
+ * value — each clamped to [minVal, maxVal].
+ */
+export function resolveSignalField<SD>(
+	op: { inputs?: NodeOperationInputs },
+	fieldName: string,
+	defaultValue: number,
+	minVal = Number.NEGATIVE_INFINITY,
+	maxVal = Number.POSITIVE_INFINITY,
+): { hasSignal: boolean; sd: SD | null; value: number } {
+	const clamp = (v: number) => Math.max(minVal, Math.min(maxVal, v));
+	const fields = op as Record<string, unknown>;
+	const handleId = fields[`${fieldName}HandleId`] as string | null | undefined;
+	const signalInput = handleId ? op.inputs?.[handleId] : null;
+	const outputType = signalInput?.connectionValid
+		? signalInput.outputItem?.type
+		: undefined;
+	const hasSignal = outputType === "Signal" || outputType === "Numeric";
+	const sd =
+		hasSignal && signalInput?.outputItem?.data
+			? (signalInput.outputItem.data as SD)
+			: null;
+
+	let value = defaultValue;
+	if (!hasSignal) {
+		const raw =
+			outputType === "Number"
+				? signalInput?.outputItem?.data
+				: fields[fieldName];
+		value = clamp(Number(raw ?? defaultValue));
+	} else if (sd) {
+		value = clamp(Number((sd as { offset?: unknown }).offset ?? defaultValue));
+	}
+	return { hasSignal, sd, value };
+}
+
+/**
+ * Whether the handle whose id is stored at `op[handleIdKey]` has a valid
+ * Signal or Number connection.
+ */
+export function isHandleConnected(
+	op: Record<string, unknown>,
+	handleIdKey: string,
+): boolean {
+	const handleId = op[handleIdKey];
+	if (typeof handleId !== "string" || !handleId) return false;
+	const input = (op.inputs as NodeOperationInputs | undefined)?.[handleId];
+	return Boolean(
+		input?.connectionValid &&
+			input.outputItem &&
+			(input.outputItem.type === "Signal" ||
+				input.outputItem.type === "Number"),
+	);
+}
+
 export interface NodeRendererPlugin {
 	WebGPURenderer?: WebGPUNodeRenderer;
 	audioProcessor?: AudioProcessor;
@@ -151,3 +346,5 @@ export const audioRegistry: AudioProcessorRegistry = (() => {
 	}
 	return g[GLOBAL_AUDIO_KEY];
 })();
+
+export * from "./homography.js";

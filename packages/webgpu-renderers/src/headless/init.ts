@@ -1,5 +1,5 @@
 import { debugLog } from "../debug-log.js";
-import { HeadlessDOMMatrix } from "./dom-matrix.js";
+import { installDOMGeometryGlobals } from "./dom-matrix.js";
 
 export async function initHeadlessWebGPU(): Promise<void> {
 	const { create, globals } = await import(/* webpackIgnore: true */ "webgpu");
@@ -46,34 +46,7 @@ export async function initHeadlessWebGPU(): Promise<void> {
 		}
 	}
 
-	const domObj = globalThis as unknown as { DOMMatrix?: any; DOMPoint?: any };
-	if (typeof domObj.DOMMatrix === "undefined") {
-		domObj.DOMMatrix = HeadlessDOMMatrix;
-	}
-
-	if (typeof domObj.DOMPoint === "undefined") {
-		domObj.DOMPoint = class DOMPoint {
-			constructor(
-				public x = 0,
-				public y = 0,
-				public z = 0,
-				public w = 1,
-			) {}
-			static fromPoint(other: {
-				x?: number;
-				y?: number;
-				z?: number;
-				w?: number;
-			}) {
-				return new DOMPoint(
-					other.x ?? 0,
-					other.y ?? 0,
-					other.z ?? 0,
-					other.w ?? 1,
-				);
-			}
-		};
-	}
+	installDOMGeometryGlobals();
 
 	if (typeof (globalThis as any).createImageBitmap === "undefined") {
 		(globalThis as any).createImageBitmap = async (source: any) => {

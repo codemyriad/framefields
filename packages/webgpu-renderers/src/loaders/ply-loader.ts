@@ -1,6 +1,6 @@
 import fs from "node:fs";
-import { type Vec3, Vector3Math } from "../math3d/index.js";
 import type { LoadModelOptions, Material3D, Mesh3DData, Model3DData } from "./types.js";
+import { accumulateVertexNormals, computeBounds, createIndexArray, resolveModelTransform, transformModelBounds, transformPositions } from "./mesh-utils.js";
 
 interface PlyProperty {
 	name: string;
@@ -376,103 +376,14 @@ export class PlyLoader {
 	): Model3DData {
 		// Calculate face normals if missing
 		if (!hasNormals || options.smoothNormals) {
-			for (let i = 0; i < rawIndices.length; i += 3) {
-				const i0 = rawIndices[i]!;
-				const i1 = rawIndices[i + 1]!;
-				const i2 = rawIndices[i + 2]!;
-
-				const p0: Vec3 = [rawPositions[i0 * 3]!, rawPositions[i0 * 3 + 1]!, rawPositions[i0 * 3 + 2]!];
-				const p1: Vec3 = [rawPositions[i1 * 3]!, rawPositions[i1 * 3 + 1]!, rawPositions[i1 * 3 + 2]!];
-				const p2: Vec3 = [rawPositions[i2 * 3]!, rawPositions[i2 * 3 + 1]!, rawPositions[i2 * 3 + 2]!];
-
-				const e1 = Vector3Math.subtract(p1, p0);
-				const e2 = Vector3Math.subtract(p2, p0);
-				const fn = Vector3Math.cross(e1, e2);
-
-				rawNormals[i0 * 3] += fn[0];
-				rawNormals[i0 * 3 + 1] += fn[1];
-				rawNormals[i0 * 3 + 2] += fn[2];
-
-				rawNormals[i1 * 3] += fn[0];
-				rawNormals[i1 * 3 + 1] += fn[1];
-				rawNormals[i1 * 3 + 2] += fn[2];
-
-				rawNormals[i2 * 3] += fn[0];
-				rawNormals[i2 * 3 + 1] += fn[1];
-				rawNormals[i2 * 3 + 2] += fn[2];
-			}
-
-			for (let i = 0; i < rawNormals.length; i += 3) {
-				const nx = rawNormals[i]!;
-				const ny = rawNormals[i + 1]!;
-				const nz = rawNormals[i + 2]!;
-				const len = Math.hypot(nx, ny, nz) || 1.0;
-				rawNormals[i] = nx / len;
-				rawNormals[i + 1] = ny / len;
-				rawNormals[i + 2] = nz / len;
-			}
+			accumulateVertexNormals(rawPositions, rawIndices, rawNormals);
 		}
 
-		let minX = Infinity, minY = Infinity, minZ = Infinity;
-		let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+		const bounds = computeBounds(rawPositions);
+		const transform = resolveModelTransform(bounds, options);
+		const positions = transformPositions(rawPositions, transform);
 
-		for (let i = 0; i < rawPositions.length; i += 3) {
-			const x = rawPositions[i]!;
-			const y = rawPositions[i + 1]!;
-			const z = rawPositions[i + 2]!;
-			if (x < minX) minX = x;
-			if (x > maxX) maxX = x;
-			if (y < minY) minY = y;
-			if (y > maxY) maxY = y;
-			if (z < minZ) minZ = z;
-			if (z > maxZ) maxZ = z;
-		}
-
-		if (!Number.isFinite(minX)) {
-			minX = minY = minZ = 0;
-			maxX = maxY = maxZ = 0;
-		}
-
-		const centerX = (minX + maxX) * 0.5;
-		const centerY = (minY + maxY) * 0.5;
-		const centerZ = (minZ + maxZ) * 0.5;
-
-		const sizeX = maxX - minX;
-		const sizeY = maxY - minY;
-		const sizeZ = maxZ - minZ;
-		const maxDimension = Math.max(sizeX, sizeY, sizeZ, 0.0001);
-
-		let scaleMultiplier = 1.0;
-		if (options.normalizeSize && options.normalizeSize > 0) {
-			scaleMultiplier = options.normalizeSize / maxDimension;
-		}
-
-		let scaleX = scaleMultiplier;
-		let scaleY = scaleMultiplier;
-		let scaleZ = scaleMultiplier;
-		if (typeof options.scale === "number") {
-			scaleX *= options.scale;
-			scaleY *= options.scale;
-			scaleZ *= options.scale;
-		} else if (Array.isArray(options.scale)) {
-			scaleX *= options.scale[0];
-			scaleY *= options.scale[1];
-			scaleZ *= options.scale[2];
-		}
-
-		const offsetX = options.center ? centerX : 0;
-		const offsetY = options.center ? centerY : 0;
-		const offsetZ = options.center ? centerZ : 0;
-
-		const positions = new Float32Array(rawPositions.length);
-		for (let i = 0; i < rawPositions.length; i += 3) {
-			positions[i] = (rawPositions[i]! - offsetX) * scaleX;
-			positions[i + 1] = (rawPositions[i + 1]! - offsetY) * scaleY;
-			positions[i + 2] = (rawPositions[i + 2]! - offsetZ) * scaleZ;
-		}
-
-		const isLarge = positions.length / 3 > 65535;
-		const indexArray = isLarge ? new Uint32Array(rawIndices) : new Uint16Array(rawIndices);
+		const indexArray = createIndexArray(rawIndices, positions.length / 3);
 
 		const defaultMaterial: Material3D = {
 			name: "ply_default",
@@ -495,25 +406,13 @@ export class PlyLoader {
 			},
 		];
 
-		const finalMinX = (minX - offsetX) * scaleX;
-		const finalMinY = (minY - offsetY) * scaleY;
-		const finalMinZ = (minZ - offsetZ) * scaleZ;
-		const finalMaxX = (maxX - offsetX) * scaleX;
-		const finalMaxY = (maxY - offsetY) * scaleY;
-		const finalMaxZ = (maxZ - offsetZ) * scaleZ;
 
 		return {
 			name: "PLY_Model",
 			meshes,
 			materials: { ply_default: defaultMaterial },
 			animations: [],
-			bounds: {
-				min: [finalMinX, finalMinY, finalMinZ],
-				max: [finalMaxX, finalMaxY, finalMaxZ],
-				center: [(finalMinX + finalMaxX) * 0.5, (finalMinY + finalMaxY) * 0.5, (finalMinZ + finalMaxZ) * 0.5],
-				size: [finalMaxX - finalMinX, finalMaxY - finalMinY, finalMaxZ - finalMinZ],
-				boundingSphereRadius: Math.hypot(finalMaxX - finalMinX, finalMaxY - finalMinY, finalMaxZ - finalMinZ) * 0.5,
-			},
+			bounds: transformModelBounds(bounds, transform),
 		};
 	}
 

@@ -1,5 +1,6 @@
 import {
 	type AudioProcessor,
+	isHandleConnected,
 	resolveNumber,
 	resolveString,
 } from "@framefields/node-sdk";
@@ -137,11 +138,6 @@ export const fadeAudioProcessor: AudioProcessor = async (
 	}
 
 	const op = (virtualMedia.operation as Record<string, unknown>) || {};
-	const inputs =
-		(op.inputs as Record<
-			string,
-			{ connectionValid?: boolean; outputItem?: { type?: string } }
-		>) || {};
 
 	const numChannels = channels.length;
 	if (numChannels === 0) return;
@@ -175,22 +171,10 @@ export const fadeAudioProcessor: AudioProcessor = async (
 		fadeOut = Math.min(fadeOut, half);
 	}
 
-	const isHandleConnected = (handleIdKey: string): boolean => {
-		const handleId = op[handleIdKey];
-		if (typeof handleId !== "string" || !handleId) return false;
-		const input = inputs[handleId];
-		return Boolean(
-			input?.connectionValid &&
-				input.outputItem &&
-				(input.outputItem.type === "Signal" ||
-					input.outputItem.type === "Number"),
-		);
-	};
-
-	const hasFadeInDurationSig = isHandleConnected("fadeInDurationHandleId")
+	const hasFadeInDurationSig = isHandleConnected(op, "fadeInDurationHandleId")
 		? 1.0
 		: 0.0;
-	const hasFadeOutDurationSig = isHandleConnected("fadeOutDurationHandleId")
+	const hasFadeOutDurationSig = isHandleConnected(op, "fadeOutDurationHandleId")
 		? 1.0
 		: 0.0;
 

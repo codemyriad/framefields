@@ -1,6 +1,17 @@
 /// <reference types="webgpu" />
 import type { SignalData } from "@framefields/core";
-import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	resolveSignalField,
+	type WebGPUNodeRenderer,
+} from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+	perDevice,
+	signalTiming,
+	texturesLayout,
+} from "@framefields/node-sdk/gpu";
 import { signalRegistry } from "@framefields/webgpu-renderers";
 
 interface ProceduralVFXYOp {
@@ -73,27 +84,7 @@ struct VFXUniforms {
 @group(1) @binding(3) var intensityTex : texture_2d<f32>;
 @group(1) @binding(4) var seedTex      : texture_2d<f32>;
 @group(1) @binding(5) var signalSamp   : sampler;
-
-struct VSOut {
-    @builtin(position) pos : vec4<f32>,
-    @location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-    var pos = array<vec2<f32>, 4>(
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(1.0, -1.0)
-    );
-    var uv = array<vec2<f32>, 4>(
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(1.0, 0.0),
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 1.0)
-    );
-    return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 // ---- hashing & noise primitives -------------------------------------------
 fn hash21(p: vec2<f32>) -> vec2<f32> {
@@ -393,72 +384,13 @@ fn fxEnergyBeam(p: vec2<f32>, time: f32, scl: f32, dens: f32, inten: f32, cA: ve
 }
 `;
 
-interface DeviceVFXResources {
-	uniformLayout: GPUBindGroupLayout;
-	signalsLayout: GPUBindGroupLayout;
-	pipelineCache: Map<string, GPURenderPipeline>;
-}
-
-const deviceResourceCache = new WeakMap<GPUDevice, DeviceVFXResources>();
 const vfxUniformData = new Float32Array(24);
 
-function getDeviceLayouts(device: GPUDevice): DeviceVFXResources {
-	let res = deviceResourceCache.get(device);
-	if (res) return res;
-
-	const uniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
-
-	const signalsLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 2,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 3,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 4,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 5,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-
-	res = {
-		uniformLayout,
-		signalsLayout,
-		pipelineCache: new Map(),
-	};
-	deviceResourceCache.set(device, res);
-	return res;
-}
+const getDeviceLayouts = perDevice((device) => ({
+	uniformLayout: fragmentBindGroupLayout(device, ["uniform"]),
+	signalsLayout: texturesLayout(device, 5),
+	pipelineCache: new Map<string, GPURenderPipeline>(),
+}));
 
 function getVFXResources(device: GPUDevice, format: GPUTextureFormat) {
 	const layouts = getDeviceLayouts(device);
@@ -471,18 +403,11 @@ function getVFXResources(device: GPUDevice, format: GPUTextureFormat) {
 			code: VFX_SHADER,
 		});
 
-		pipeline = device.createRenderPipeline({
+		pipeline = createFullscreenPipeline(device, {
 			label: `ProceduralVFXPipeline_${format}`,
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [layouts.uniformLayout, layouts.signalsLayout],
-			}),
-			vertex: { module: vfxModule, entryPoint: "vs" },
-			fragment: {
-				module: vfxModule,
-				entryPoint: "fs",
-				targets: [{ format }],
-			},
-			primitive: { topology: "triangle-strip" },
+			module: vfxModule,
+			layouts: [layouts.uniformLayout, layouts.signalsLayout],
+			format,
 		});
 		layouts.pipelineCache.set(cacheKey, pipeline);
 	}
@@ -526,39 +451,6 @@ const VFX_EFFECT_INDEX: Record<string, number> = {
 	EnergyBeam: 10,
 };
 
-function resolveVFXField(
-	op: ProceduralVFXYOp,
-	fieldName: "density" | "scale" | "speed" | "intensity" | "seed",
-	defaultValue: number,
-): { hasSignal: boolean; sd: any; value: number } {
-	const handleIdKey = `${fieldName}HandleId` as keyof ProceduralVFXYOp;
-	const handleId = op[handleIdKey] as string | null | undefined;
-	const signalInput = handleId ? op.inputs?.[handleId] : null;
-
-	const hasSignal = !!(
-		signalInput?.connectionValid &&
-		(signalInput.outputItem?.type === "Signal" ||
-			signalInput.outputItem?.type === "Numeric")
-	);
-	const sd = hasSignal ? signalInput?.outputItem?.data : null;
-
-	let value = defaultValue;
-	if (!hasSignal) {
-		if (
-			signalInput?.connectionValid &&
-			signalInput.outputItem?.type === "Number"
-		) {
-			value = Number(signalInput.outputItem.data ?? defaultValue);
-		} else {
-			value = Number(op[fieldName] ?? defaultValue);
-		}
-	} else if (sd && typeof sd === "object" && "offset" in sd) {
-		value = Number(sd.offset ?? defaultValue);
-	}
-
-	return { hasSignal, sd, value };
-}
-
 export const ProceduralVFXWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const { ctx, encoder, pass, targetWidth, targetHeight, props } = args;
 
@@ -574,22 +466,16 @@ export const ProceduralVFXWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const frame = props.frame ?? 0;
 	const fps = props.fps || 30;
 
-	const densityInfo = resolveVFXField(op, "density", 0.6);
-	const scaleInfo = resolveVFXField(op, "scale", 0.01);
-	const speedInfo = resolveVFXField(op, "speed", 1.0);
-	const intensityInfo = resolveVFXField(op, "intensity", 0.8);
-	const seedInfo = resolveVFXField(op, "seed", 1234);
+	const densityInfo = resolveSignalField<VFXSignalData>(op, "density", 0.6);
+	const scaleInfo = resolveSignalField<VFXSignalData>(op, "scale", 0.01);
+	const speedInfo = resolveSignalField<VFXSignalData>(op, "speed", 1.0);
+	const intensityInfo = resolveSignalField<VFXSignalData>(op, "intensity", 0.8);
+	const seedInfo = resolveSignalField<VFXSignalData>(op, "seed", 1234);
 
 	const effectIndex = VFX_EFFECT_INDEX[op.effectType ?? "Smoke"] ?? 0;
 	const outputTypeVal = op.outputType === "Video" ? 1.0 : 0.0;
 
-	const elapsedSeconds =
-		props.elapsedMs !== undefined ? props.elapsedMs / 1000 : frame / fps;
-	const durationSeconds = props.virtualMedia?.metadata?.durationMs
-		? props.virtualMedia.metadata.durationMs / 1000
-		: props.durationMs !== undefined
-			? props.durationMs / 1000
-			: 0;
+	const { elapsedSeconds, durationSeconds } = signalTiming(props, frame, fps);
 
 	const colorStartVal = hexToRgba(op.colorStart ?? "#ffffff");
 	const colorEndVal = hexToRgba(op.colorEnd ?? "#ff5500");
@@ -645,7 +531,7 @@ export const ProceduralVFXWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 			const view = signalRegistry.getOrCreate2DTextureView(
 				ctx.device,
 				encoder,
-				f.info.sd.nodeId ?? `procedural_vfx_${f.name}_sig`,
+				f.info.sd?.nodeId ?? `procedural_vfx_${f.name}_sig`,
 				elapsedSeconds,
 				durationSeconds,
 				f.info.sd as VFXSignalData,

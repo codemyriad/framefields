@@ -1,79 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
-
-// Polyfill WebGPU globals for test runner
-if (typeof globalThis.GPUBufferUsage === "undefined") {
-	globalThis.GPUBufferUsage = {
-		MAP_READ: 1,
-		MAP_WRITE: 2,
-		COPY_SRC: 4,
-		COPY_DST: 8,
-		INDEX: 16,
-		VERTEX: 32,
-		UNIFORM: 64,
-		STORAGE: 128,
-		INDIRECT: 256,
-		QUERY_RESOLVE: 512,
-	} as unknown as typeof GPUBufferUsage;
-}
-
-if (typeof globalThis.GPUTextureUsage === "undefined") {
-	globalThis.GPUTextureUsage = {
-		COPY_SRC: 1,
-		COPY_DST: 2,
-		TEXTURE_BINDING: 4,
-		STORAGE_BINDING: 8,
-		RENDER_ATTACHMENT: 16,
-	} as unknown as typeof GPUTextureUsage;
-}
+import { describe, expect, it } from "vitest";
 
 import { SignalRegistry } from "./signal-registry.js";
+import { createRenderMocks, installGPUUsageGlobals } from "./test-helpers.js";
+
+installGPUUsageGlobals();
 
 describe("SignalRegistry - SignalMath WebGPU Dispatch", () => {
 	it("dispatches remap operation and sets computed stats", () => {
 		const registry = new SignalRegistry();
 
-		const mockTexture = {
-			createView: vi.fn().mockReturnValue({}),
-			destroy: vi.fn(),
-			width: 256,
-			height: 1,
-		} as unknown as GPUTexture;
-
-		const mockBuffer = {
-			destroy: vi.fn(),
-		} as unknown as GPUBuffer;
-
-		const mockPipeline = {
-			getBindGroupLayout: vi.fn().mockReturnValue({}),
-		} as unknown as GPURenderPipeline;
-
-		const mockPass = {
-			setPipeline: vi.fn(),
-			setBindGroup: vi.fn(),
-			draw: vi.fn(),
-			end: vi.fn(),
-		};
-
-		const mockEncoder = {
-			beginRenderPass: vi.fn().mockReturnValue(mockPass),
-			copyBufferToTexture: vi.fn(),
-			finish: vi.fn().mockReturnValue({}),
-		} as unknown as GPUCommandEncoder;
-
-		const mockDevice = {
-			createTexture: vi.fn().mockReturnValue(mockTexture),
-			createBuffer: vi.fn().mockReturnValue(mockBuffer),
-			createSampler: vi.fn().mockReturnValue({}),
-			createShaderModule: vi.fn().mockReturnValue({}),
-			createRenderPipeline: vi.fn().mockReturnValue(mockPipeline),
-			createBindGroup: vi.fn().mockReturnValue({}),
-			createCommandEncoder: vi.fn().mockReturnValue(mockEncoder),
-			queue: {
-				writeBuffer: vi.fn(),
-				writeTexture: vi.fn(),
-				submit: vi.fn(),
-			},
-		} as unknown as GPUDevice;
+		const { mockEncoder, mockDevice } = createRenderMocks(256, 1);
 
 		const nodeId = "math-remap-1";
 		const signalData = {
@@ -114,48 +50,7 @@ describe("SignalRegistry - SignalMath WebGPU Dispatch", () => {
 	it("compiles and dispatches custom WGSL mode", () => {
 		const registry = new SignalRegistry();
 
-		const mockTexture = {
-			createView: vi.fn().mockReturnValue({}),
-			destroy: vi.fn(),
-			width: 128,
-			height: 1,
-		} as unknown as GPUTexture;
-
-		const mockBuffer = {
-			destroy: vi.fn(),
-		} as unknown as GPUBuffer;
-
-		const mockPipeline = {
-			getBindGroupLayout: vi.fn().mockReturnValue({}),
-		} as unknown as GPURenderPipeline;
-
-		const mockPass = {
-			setPipeline: vi.fn(),
-			setBindGroup: vi.fn(),
-			draw: vi.fn(),
-			end: vi.fn(),
-		};
-
-		const mockEncoder = {
-			beginRenderPass: vi.fn().mockReturnValue(mockPass),
-			copyBufferToTexture: vi.fn(),
-			finish: vi.fn().mockReturnValue({}),
-		} as unknown as GPUCommandEncoder;
-
-		const mockDevice = {
-			createTexture: vi.fn().mockReturnValue(mockTexture),
-			createBuffer: vi.fn().mockReturnValue(mockBuffer),
-			createSampler: vi.fn().mockReturnValue({}),
-			createShaderModule: vi.fn().mockReturnValue({}),
-			createRenderPipeline: vi.fn().mockReturnValue(mockPipeline),
-			createBindGroup: vi.fn().mockReturnValue({}),
-			createCommandEncoder: vi.fn().mockReturnValue(mockEncoder),
-			queue: {
-				writeBuffer: vi.fn(),
-				writeTexture: vi.fn(),
-				submit: vi.fn(),
-			},
-		} as unknown as GPUDevice;
+		const { mockEncoder, mockDevice } = createRenderMocks(128, 1);
 
 		const nodeId = "math-custom-1";
 		const customWGSL = "return pow(a, 2.5) * b;";
@@ -189,48 +84,7 @@ describe("SignalRegistry - SignalMath WebGPU Dispatch", () => {
 	it("dispatches add operation with constant value and computes accurate shifted stats", () => {
 		const registry = new SignalRegistry();
 
-		const mockTexture = {
-			createView: vi.fn().mockReturnValue({}),
-			destroy: vi.fn(),
-			width: 256,
-			height: 1,
-		} as unknown as GPUTexture;
-
-		const mockBuffer = {
-			destroy: vi.fn(),
-		} as unknown as GPUBuffer;
-
-		const mockPipeline = {
-			getBindGroupLayout: vi.fn().mockReturnValue({}),
-		} as unknown as GPURenderPipeline;
-
-		const mockPass = {
-			setPipeline: vi.fn(),
-			setBindGroup: vi.fn(),
-			draw: vi.fn(),
-			end: vi.fn(),
-		};
-
-		const mockEncoder = {
-			beginRenderPass: vi.fn().mockReturnValue(mockPass),
-			copyBufferToTexture: vi.fn(),
-			finish: vi.fn().mockReturnValue({}),
-		} as unknown as GPUCommandEncoder;
-
-		const mockDevice = {
-			createTexture: vi.fn().mockReturnValue(mockTexture),
-			createBuffer: vi.fn().mockReturnValue(mockBuffer),
-			createSampler: vi.fn().mockReturnValue({}),
-			createShaderModule: vi.fn().mockReturnValue({}),
-			createRenderPipeline: vi.fn().mockReturnValue(mockPipeline),
-			createBindGroup: vi.fn().mockReturnValue({}),
-			createCommandEncoder: vi.fn().mockReturnValue(mockEncoder),
-			queue: {
-				writeBuffer: vi.fn(),
-				writeTexture: vi.fn(),
-				submit: vi.fn(),
-			},
-		} as unknown as GPUDevice;
+		const { mockEncoder, mockDevice } = createRenderMocks(256, 1);
 
 		const nodeId = "math-add-1";
 		const signalData = {
@@ -266,48 +120,7 @@ describe("SignalRegistry - SignalMath WebGPU Dispatch", () => {
 	it("resolves signalB when passed as a raw number input instead of config bValue", () => {
 		const registry = new SignalRegistry();
 
-		const mockTexture = {
-			createView: vi.fn().mockReturnValue({}),
-			destroy: vi.fn(),
-			width: 256,
-			height: 1,
-		} as unknown as GPUTexture;
-
-		const mockBuffer = {
-			destroy: vi.fn(),
-		} as unknown as GPUBuffer;
-
-		const mockPipeline = {
-			getBindGroupLayout: vi.fn().mockReturnValue({}),
-		} as unknown as GPURenderPipeline;
-
-		const mockPass = {
-			setPipeline: vi.fn(),
-			setBindGroup: vi.fn(),
-			draw: vi.fn(),
-			end: vi.fn(),
-		};
-
-		const mockEncoder = {
-			beginRenderPass: vi.fn().mockReturnValue(mockPass),
-			copyBufferToTexture: vi.fn(),
-			finish: vi.fn().mockReturnValue({}),
-		} as unknown as GPUCommandEncoder;
-
-		const mockDevice = {
-			createTexture: vi.fn().mockReturnValue(mockTexture),
-			createBuffer: vi.fn().mockReturnValue(mockBuffer),
-			createSampler: vi.fn().mockReturnValue({}),
-			createShaderModule: vi.fn().mockReturnValue({}),
-			createRenderPipeline: vi.fn().mockReturnValue(mockPipeline),
-			createBindGroup: vi.fn().mockReturnValue({}),
-			createCommandEncoder: vi.fn().mockReturnValue(mockEncoder),
-			queue: {
-				writeBuffer: vi.fn(),
-				writeTexture: vi.fn(),
-				submit: vi.fn(),
-			},
-		} as unknown as GPUDevice;
+		const { mockEncoder, mockDevice } = createRenderMocks(256, 1);
 
 		const nodeId = "math-add-raw-num";
 		const signalData = {
@@ -343,48 +156,7 @@ describe("SignalRegistry - SignalMath WebGPU Dispatch", () => {
 	it("invalidates downstream signal math cache and updates stats when upstream number or input changes", () => {
 		const registry = new SignalRegistry();
 
-		const mockTexture = {
-			createView: vi.fn().mockReturnValue({}),
-			destroy: vi.fn(),
-			width: 256,
-			height: 1,
-		} as unknown as GPUTexture;
-
-		const mockBuffer = {
-			destroy: vi.fn(),
-		} as unknown as GPUBuffer;
-
-		const mockPipeline = {
-			getBindGroupLayout: vi.fn().mockReturnValue({}),
-		} as unknown as GPURenderPipeline;
-
-		const mockPass = {
-			setPipeline: vi.fn(),
-			setBindGroup: vi.fn(),
-			draw: vi.fn(),
-			end: vi.fn(),
-		};
-
-		const mockEncoder = {
-			beginRenderPass: vi.fn().mockReturnValue(mockPass),
-			copyBufferToTexture: vi.fn(),
-			finish: vi.fn().mockReturnValue({}),
-		} as unknown as GPUCommandEncoder;
-
-		const mockDevice = {
-			createTexture: vi.fn().mockReturnValue(mockTexture),
-			createBuffer: vi.fn().mockReturnValue(mockBuffer),
-			createSampler: vi.fn().mockReturnValue({}),
-			createShaderModule: vi.fn().mockReturnValue({}),
-			createRenderPipeline: vi.fn().mockReturnValue(mockPipeline),
-			createBindGroup: vi.fn().mockReturnValue({}),
-			createCommandEncoder: vi.fn().mockReturnValue(mockEncoder),
-			queue: {
-				writeBuffer: vi.fn(),
-				writeTexture: vi.fn(),
-				submit: vi.fn(),
-			},
-		} as unknown as GPURenderPipeline as unknown as GPUDevice;
+		const { mockEncoder, mockDevice } = createRenderMocks(256, 1);
 
 		// Set initial upstream base signal stats
 		registry.setStats("source-audio", { min: 0.1, max: 0.9 });
@@ -487,48 +259,7 @@ describe("SignalRegistry - SignalMath WebGPU Dispatch", () => {
 	it("recalculates stats immediately when operation changes from Add to Subtract without changing bValue", () => {
 		const registry = new SignalRegistry();
 
-		const mockTexture = {
-			createView: vi.fn().mockReturnValue({}),
-			destroy: vi.fn(),
-			width: 256,
-			height: 1,
-		} as unknown as GPUTexture;
-
-		const mockBuffer = {
-			destroy: vi.fn(),
-		} as unknown as GPUBuffer;
-
-		const mockPipeline = {
-			getBindGroupLayout: vi.fn().mockReturnValue({}),
-		} as unknown as GPURenderPipeline;
-
-		const mockPass = {
-			setPipeline: vi.fn(),
-			setBindGroup: vi.fn(),
-			draw: vi.fn(),
-			end: vi.fn(),
-		};
-
-		const mockEncoder = {
-			beginRenderPass: vi.fn().mockReturnValue(mockPass),
-			copyBufferToTexture: vi.fn(),
-			finish: vi.fn().mockReturnValue({}),
-		} as unknown as GPUCommandEncoder;
-
-		const mockDevice = {
-			createTexture: vi.fn().mockReturnValue(mockTexture),
-			createBuffer: vi.fn().mockReturnValue(mockBuffer),
-			createSampler: vi.fn().mockReturnValue({}),
-			createShaderModule: vi.fn().mockReturnValue({}),
-			createRenderPipeline: vi.fn().mockReturnValue(mockPipeline),
-			createBindGroup: vi.fn().mockReturnValue({}),
-			createCommandEncoder: vi.fn().mockReturnValue(mockEncoder),
-			queue: {
-				writeBuffer: vi.fn(),
-				writeTexture: vi.fn(),
-				submit: vi.fn(),
-			},
-		} as unknown as GPURenderPipeline as unknown as GPUDevice;
+		const { mockEncoder, mockDevice } = createRenderMocks(256, 1);
 
 		registry.setStats("source-sig", { min: 2.0, max: 5.0 });
 
@@ -594,48 +325,7 @@ describe("SignalRegistry - SignalMath WebGPU Dispatch", () => {
 	it("does not clamp add operation to [0, 1] range", () => {
 		const registry = new SignalRegistry();
 
-		const mockTexture = {
-			createView: vi.fn().mockReturnValue({}),
-			destroy: vi.fn(),
-			width: 256,
-			height: 1,
-		} as unknown as GPUTexture;
-
-		const mockBuffer = {
-			destroy: vi.fn(),
-		} as unknown as GPUBuffer;
-
-		const mockPipeline = {
-			getBindGroupLayout: vi.fn().mockReturnValue({}),
-		} as unknown as GPURenderPipeline;
-
-		const mockPass = {
-			setPipeline: vi.fn(),
-			setBindGroup: vi.fn(),
-			draw: vi.fn(),
-			end: vi.fn(),
-		};
-
-		const mockEncoder = {
-			beginRenderPass: vi.fn().mockReturnValue(mockPass),
-			copyBufferToTexture: vi.fn(),
-			finish: vi.fn().mockReturnValue({}),
-		} as unknown as GPUCommandEncoder;
-
-		const mockDevice = {
-			createTexture: vi.fn().mockReturnValue(mockTexture),
-			createBuffer: vi.fn().mockReturnValue(mockBuffer),
-			createSampler: vi.fn().mockReturnValue({}),
-			createShaderModule: vi.fn().mockReturnValue({}),
-			createRenderPipeline: vi.fn().mockReturnValue(mockPipeline),
-			createBindGroup: vi.fn().mockReturnValue({}),
-			createCommandEncoder: vi.fn().mockReturnValue(mockEncoder),
-			queue: {
-				writeBuffer: vi.fn(),
-				writeTexture: vi.fn(),
-				submit: vi.fn(),
-			},
-		} as unknown as GPUDevice;
+		const { mockEncoder, mockDevice } = createRenderMocks(256, 1);
 
 		registry.setStats("source-sig", { min: 0.636, max: 1.15 });
 

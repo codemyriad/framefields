@@ -1,4 +1,5 @@
 import { vi } from "vitest";
+import { installDOMGeometryGlobals } from "../headless/dom-matrix.js";
 
 export interface MockTexture {
 	width: number;
@@ -47,7 +48,6 @@ export function createMockBuffer(size: number, usage: number): MockBuffer {
 	};
 }
 
-
 export function createMockDevice(): GPUDevice {
 	const onSubmittedWorkDonePromise = Promise.resolve();
 	const queue = {
@@ -68,17 +68,15 @@ export function createMockDevice(): GPUDevice {
 		createBuffer: vi
 			.fn()
 			.mockImplementation((desc) => createMockBuffer(desc.size, desc.usage)),
-		createTexture: vi
-			.fn()
-			.mockImplementation((desc) => {
-				const w = Array.isArray(desc.size)
-					? desc.size[0]
-					: (desc.size?.width ?? 1024);
-				const h = Array.isArray(desc.size)
-					? desc.size[1]
-					: (desc.size?.height ?? 1024);
-				return createMockTexture(w, h, desc.format, desc.usage);
-			}),
+		createTexture: vi.fn().mockImplementation((desc) => {
+			const w = Array.isArray(desc.size)
+				? desc.size[0]
+				: (desc.size?.width ?? 1024);
+			const h = Array.isArray(desc.size)
+				? desc.size[1]
+				: (desc.size?.height ?? 1024);
+			return createMockTexture(w, h, desc.format, desc.usage);
+		}),
 		createSampler: vi.fn().mockImplementation(() => ({})),
 		createShaderModule: vi.fn().mockImplementation(() => ({})),
 		createBindGroupLayout: vi.fn().mockImplementation(() => ({})),
@@ -126,116 +124,24 @@ export function createMockCommandEncoder(): GPUCommandEncoder {
 }
 
 export function ensureDOMGlobals() {
-	const domObj = globalThis as unknown as { DOMMatrix?: any; DOMPoint?: any };
-	if (typeof domObj.DOMMatrix === "undefined") {
-		domObj.DOMMatrix = class DOMMatrix {
-			a = 1;
-			b = 0;
-			c = 0;
-			d = 1;
-			e = 0;
-			f = 0;
+	installDOMGeometryGlobals();
+}
 
-			constructor(init?: any) {
-				this.a = 1;
-				this.b = 0;
-				this.c = 0;
-				this.d = 1;
-				this.e = 0;
-				this.f = 0;
-				if (init instanceof DOMMatrix) {
-					this.a = init.a;
-					this.b = init.b;
-					this.c = init.c;
-					this.d = init.d;
-					this.e = init.e;
-					this.f = init.f;
-				}
-			}
-
-			multiply(other: DOMMatrix): DOMMatrix {
-				const m = new DOMMatrix();
-				m.a = this.a * other.a + this.c * other.b;
-				m.b = this.b * other.a + this.d * other.b;
-				m.c = this.a * other.c + this.c * other.d;
-				m.d = this.b * other.c + this.d * other.d;
-				m.e = this.a * other.e + this.c * other.f + this.e;
-				m.f = this.b * other.e + this.d * other.f + this.f;
-				return m;
-			}
-
-			inverse(): DOMMatrix {
-				const det = this.a * this.d - this.b * this.c;
-				if (det === 0) throw new Error("Matrix is not invertible");
-				const m = new DOMMatrix();
-				m.a = this.d / det;
-				m.b = -this.b / det;
-				m.c = -this.c / det;
-				m.d = this.a / det;
-				m.e = (this.c * this.f - this.d * this.e) / det;
-				m.f = (this.b * this.e - this.a * this.f) / det;
-				return m;
-			}
-
-			transformPoint(point: { x: number; y: number }): {
-				x: number;
-				y: number;
-			} {
-				return {
-					x: point.x * this.a + point.y * this.c + this.e,
-					y: point.x * this.b + point.y * this.d + this.f,
-				};
-			}
-
-			translate(x: number, y: number): DOMMatrix {
-				const m = new DOMMatrix();
-				m.e = x;
-				m.f = y;
-				return this.multiply(m);
-			}
-
-			scale(sx: number, sy?: number): DOMMatrix {
-				const m = new DOMMatrix();
-				m.a = sx;
-				m.d = sy ?? sx;
-				return this.multiply(m);
-			}
-
-			rotate(angle: number): DOMMatrix {
-				const rad = (angle * Math.PI) / 180;
-				const cos = Math.cos(rad);
-				const sin = Math.sin(rad);
-				const m = new DOMMatrix();
-				m.a = cos;
-				m.b = sin;
-				m.c = -sin;
-				m.d = cos;
-				return this.multiply(m);
-			}
-		};
-	}
-
-	if (typeof domObj.DOMPoint === "undefined") {
-		domObj.DOMPoint = class DOMPoint {
-			constructor(
-				public x = 0,
-				public y = 0,
-				public z = 0,
-				public w = 1,
-			) {}
-			static fromPoint(other: {
-				x?: number;
-				y?: number;
-				z?: number;
-				w?: number;
-			}) {
-				return new DOMPoint(
-					other.x ?? 0,
-					other.y ?? 0,
-					other.z ?? 0,
-					other.w ?? 1,
-				);
-			}
-		};
-	}
+/** Minimal GPU flag constants for code that ORs usage/visibility bits. */
+export function installMockGPUFlags(): void {
+	globalThis.GPUBufferUsage = {
+		UNIFORM: 1,
+		VERTEX: 2,
+		COPY_DST: 4,
+	} as any;
+	globalThis.GPUShaderStage = {
+		VERTEX: 1,
+		FRAGMENT: 2,
+	} as any;
+	globalThis.GPUTextureUsage = {
+		TEXTURE_BINDING: 1,
+		COPY_DST: 2,
+		RENDER_ATTACHMENT: 4,
+		COPY_SRC: 8,
+	} as any;
 }

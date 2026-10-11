@@ -1,5 +1,13 @@
 /// <reference types="webgpu" />
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	drawChildToTexture,
+	drawFullscreenPass,
+	drawTextureToTarget,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+} from "@framefields/node-sdk/gpu";
 import type {
 	ColorAdjustment,
 	SelectiveColorOperation,
@@ -36,27 +44,7 @@ struct SelectiveColorUniforms {
 @group(0) @binding(0) var<uniform> u : SelectiveColorUniforms;
 @group(1) @binding(0) var tex        : texture_2d<f32>;
 @group(1) @binding(1) var samp       : sampler;
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 fn calcAdjustment(cmy: vec3<f32>, adj: vec4<f32>, weight: f32, isAbsolute: bool) -> vec3<f32> {
 	if (weight <= 0.00001) {
@@ -134,48 +122,23 @@ function getSelectiveColorResources(
 ): DeviceSelectiveColorResources {
 	let res = deviceResourceCache.get(device);
 	if (!res) {
-		const uniformLayout = device.createBindGroupLayout({
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.FRAGMENT,
-					buffer: { type: "uniform" },
-				},
-			],
-		});
+		const uniformLayout = fragmentBindGroupLayout(device, ["uniform"]);
 
-		const textureLayout = device.createBindGroupLayout({
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.FRAGMENT,
-					texture: { sampleType: "float" },
-				},
-				{
-					binding: 1,
-					visibility: GPUShaderStage.FRAGMENT,
-					sampler: { type: "filtering" },
-				},
-			],
-		});
+		const textureLayout = fragmentBindGroupLayout(device, [
+			"texture",
+			"sampler",
+		]);
 
 		const shaderModule = device.createShaderModule({
 			label: "selective-color.wgsl",
 			code: WGSL_SELECTIVE_COLOR_SHADER,
 		});
 
-		const pipeline = device.createRenderPipeline({
+		const pipeline = createFullscreenPipeline(device, {
 			label: "SelectiveColorPipeline",
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [uniformLayout, textureLayout],
-			}),
-			vertex: { module: shaderModule, entryPoint: "vs" },
-			fragment: {
-				module: shaderModule,
-				entryPoint: "fs",
-				targets: [{ format }],
-			},
-			primitive: { topology: "triangle-strip" },
+			module: shaderModule,
+			layouts: [uniformLayout, textureLayout],
+			format,
 		});
 
 		res = { pipeline, uniformLayout, textureLayout };
@@ -204,12 +167,10 @@ export const SelectiveColorWebGPURenderer: WebGPUNodeRenderer = async (
 		ctx,
 		encoder,
 		pass,
-		targetView,
 		targetTexture,
 		targetWidth,
 		targetHeight,
 		props,
-		drawChild,
 	} = args;
 
 	const op = props.virtualMedia?.operation as unknown as
@@ -224,37 +185,7 @@ export const SelectiveColorWebGPURenderer: WebGPUNodeRenderer = async (
 	const width = targetWidth;
 	const height = targetHeight;
 
-	const tmpTex = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const tmpView = tmpTex.createView();
-
-	const childPass = ctx.renderer.beginFrame(
-		encoder,
-		tmpView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	childPass.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		childMedia,
-		{
-			...props,
-			virtualMedia: childMedia,
-		},
-		tmpView,
-		tmpTex,
-		width,
-		height,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	const { texture: tmpTex } = await drawChildToTexture(args, childMedia);
 
 	// Prepare Uniforms
 	packAdjustment(uniformBufferData, 0, op.reds);
@@ -284,52 +215,18 @@ export const SelectiveColorWebGPURenderer: WebGPUNodeRenderer = async (
 		...(props.excludeTextures || []),
 	]);
 
-	const renderPass = encoder.beginRenderPass({
-		colorAttachments: [
-			{
-				view: outTex.createView(),
-				loadOp: "clear",
-				storeOp: "store",
-				clearValue: { r: 0, g: 0, b: 0, a: 0 },
-			},
-		],
-	});
-
-	renderPass.setPipeline(pipeline);
-	renderPass.setBindGroup(
-		0,
+	drawFullscreenPass(encoder, outTex.createView(), pipeline, [
 		ctx.device.createBindGroup({
 			layout: uniformLayout,
 			entries: [{ binding: 0, resource: { buffer } }],
 		}),
-	);
-	renderPass.setBindGroup(
-		1,
 		ctx.renderer.bindGroupCache.getBindGroup(
 			ctx.device,
 			textureLayout,
 			tmpTex,
 			sampler,
 		),
-	);
-	renderPass.draw(4);
-	renderPass.end();
+	]);
 
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		targetWidth,
-		targetHeight,
-		"load",
-	);
-
-	ctx.renderer.drawTexture(
-		finalPass,
-		outTex,
-		{ x: 0, y: 0, width: targetWidth, height: targetHeight },
-		{ opacity: props.opacity ?? 1 },
-	);
-
-	(args as unknown as { pass: GPURenderPassEncoder }).pass = finalPass;
+	drawTextureToTarget(args, outTex, props.opacity ?? 1);
 };

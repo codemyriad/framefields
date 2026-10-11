@@ -7,11 +7,14 @@ import type { VirtualMediaData } from "@framefields/core";
 import { rendererLogger } from "@framefields/server-utils";
 import {
 	clearAllVideoCache,
+	createHeadlessDOMElement,
 	ensureDevice,
 	initHeadlessWebGPU,
+	installIntersectionObserverStub,
 	lutStore,
 	mediaDecoderCache,
 	NodeSurfaceProvider,
+	patchCanvasPrototypeForDOM,
 	type RenderContextValue,
 	Renderer2D,
 	resetDeviceInstance,
@@ -40,26 +43,7 @@ if (typeof globalThis.requestAnimationFrame === "undefined") {
 	globalObj.cancelAnimationFrame = (id: number) => clearTimeout(id);
 }
 
-const dummyDomElement = {
-	clientWidth: 1920,
-	clientHeight: 1080,
-	getBoundingClientRect: () => ({
-		x: 0,
-		y: 0,
-		left: 0,
-		top: 0,
-		right: 1920,
-		bottom: 1080,
-		width: 1920,
-		height: 1080,
-	}),
-	style: {},
-	appendChild: () => {},
-	removeChild: () => {},
-	addEventListener: () => {},
-	removeEventListener: () => {},
-	getAttribute: () => null,
-};
+const dummyDomElement = createHeadlessDOMElement();
 
 if (typeof globalThis.OffscreenCanvas === "undefined") {
 	globalObj.OffscreenCanvas = SkiaCanvas;
@@ -77,13 +61,7 @@ if (typeof globalThis.window === "undefined") {
 	globalObj.window = globalThis;
 }
 
-if (typeof globalThis.IntersectionObserver === "undefined") {
-	globalObj.IntersectionObserver = class IntersectionObserver {
-		observe() {}
-		unobserve() {}
-		disconnect() {}
-	};
-}
+installIntersectionObserverStub();
 
 if (typeof globalThis.document === "undefined") {
 	globalObj.document = {
@@ -105,69 +83,7 @@ if (typeof globalThis.document === "undefined") {
 }
 
 const skiaProto = SkiaCanvas.prototype as unknown as Record<string, unknown>;
-if (typeof skiaProto.getBoundingClientRect === "undefined") {
-	skiaProto.getBoundingClientRect = function (this: {
-		width?: number;
-		height?: number;
-	}) {
-		const width = this.width || 512;
-		const height = this.height || 512;
-		return {
-			x: 0,
-			y: 0,
-			left: 0,
-			top: 0,
-			right: width,
-			bottom: height,
-			width,
-			height,
-		};
-	};
-}
-
-if (!("style" in skiaProto)) {
-	Object.defineProperty(skiaProto, "style", {
-		get(this: { _style?: Record<string, unknown> }) {
-			this._style ??= {};
-			return this._style;
-		},
-		configurable: true,
-	});
-}
-
-if (!("clientWidth" in skiaProto)) {
-	Object.defineProperty(skiaProto, "clientWidth", {
-		get(this: { width?: number }) {
-			return this.width || 512;
-		},
-		configurable: true,
-	});
-}
-
-if (!("clientHeight" in skiaProto)) {
-	Object.defineProperty(skiaProto, "clientHeight", {
-		get(this: { height?: number }) {
-			return this.height || 512;
-		},
-		configurable: true,
-	});
-}
-
-if (!("parentElement" in skiaProto)) {
-	Object.defineProperty(skiaProto, "parentElement", {
-		get() {
-			return dummyDomElement;
-		},
-		configurable: true,
-	});
-}
-
-if (typeof skiaProto.addEventListener === "undefined") {
-	skiaProto.addEventListener = () => {};
-}
-if (typeof skiaProto.removeEventListener === "undefined") {
-	skiaProto.removeEventListener = () => {};
-}
+patchCanvasPrototypeForDOM(skiaProto, dummyDomElement);
 if (typeof skiaProto.getAttribute === "undefined") {
 	skiaProto.getAttribute = () => null;
 }

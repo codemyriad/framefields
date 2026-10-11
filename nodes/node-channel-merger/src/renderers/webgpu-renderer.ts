@@ -1,5 +1,12 @@
 /// <reference types="webgpu" />
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	beginTargetPass,
+	drawChildToTexture,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+	texturesLayout,
+} from "@framefields/node-sdk/gpu";
 import type { ChannelColorSpace, ChannelMergerOp } from "../shared/index.js";
 
 const COLOR_SPACE_MAP: Record<ChannelColorSpace, number> = {
@@ -23,27 +30,7 @@ struct MergerUniforms {
 @group(1) @binding(2) var tex3      : texture_2d<f32>;
 @group(1) @binding(3) var tex4      : texture_2d<f32>;
 @group(1) @binding(4) var samp      : sampler;
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 fn hue2rgb(p: f32, q: f32, t_in: f32) -> f32 {
 	var t = t_in;
@@ -147,45 +134,9 @@ function getDeviceLayouts(device: GPUDevice): MergerDeviceResources {
 	let res = deviceResourceCache.get(device);
 	if (res) return res;
 
-	const uniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
+	const uniformLayout = fragmentBindGroupLayout(device, ["uniform"]);
 
-	const textureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 2,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 3,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 4,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
+	const textureLayout = texturesLayout(device, 4);
 
 	res = {
 		uniformLayout,
@@ -232,7 +183,6 @@ export const ChannelMergerWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		ctx,
 		encoder,
 		pass,
-		targetView,
 		targetTexture,
 		targetWidth,
 		targetHeight,
@@ -257,111 +207,49 @@ export const ChannelMergerWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const height = targetHeight;
 
 	// 1. Draw Channel 1
-	const tex1 = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const view1 = tex1.createView();
-	const pass1 = ctx.renderer.beginFrame(
-		encoder,
-		view1,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	pass1.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
+	const { texture: tex1, view: view1 } = await drawChildToTexture(
+		args,
 		ch1Media,
 		{
-			...props,
-			virtualMedia: ch1Media,
-			renderId: `${props.renderId}-ch1`,
-			excludeTextures: [...(props.excludeTextures || []), tex1],
+			props: {
+				...props,
+				virtualMedia: ch1Media,
+				renderId: `${props.renderId}-ch1`,
+			},
 		},
-		view1,
-		tex1,
-		width,
-		height,
 	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
 	args.pass.end();
 
 	// 2. Draw Channel 2
-	const tex2 = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-		tex1,
-	]);
-	const view2 = tex2.createView();
-	const pass2 = ctx.renderer.beginFrame(
-		encoder,
-		view2,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	pass2.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
+	const { texture: tex2, view: view2 } = await drawChildToTexture(
+		args,
 		ch2Media,
 		{
-			...props,
-			virtualMedia: ch2Media,
-			renderId: `${props.renderId}-ch2`,
-			excludeTextures: [...(props.excludeTextures || []), tex1, tex2],
+			props: {
+				...props,
+				virtualMedia: ch2Media,
+				renderId: `${props.renderId}-ch2`,
+				excludeTextures: [...(props.excludeTextures || []), tex1],
+			},
+			exclude: [tex1],
 		},
-		view2,
-		tex2,
-		width,
-		height,
 	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
 	args.pass.end();
 
 	// 3. Draw Channel 3
-	const tex3 = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-		tex1,
-		tex2,
-	]);
-	const view3 = tex3.createView();
-	const pass3 = ctx.renderer.beginFrame(
-		encoder,
-		view3,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	pass3.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
+	const { texture: tex3, view: view3 } = await drawChildToTexture(
+		args,
 		ch3Media,
 		{
-			...props,
-			virtualMedia: ch3Media,
-			renderId: `${props.renderId}-ch3`,
-			excludeTextures: [...(props.excludeTextures || []), tex1, tex2, tex3],
+			props: {
+				...props,
+				virtualMedia: ch3Media,
+				renderId: `${props.renderId}-ch3`,
+				excludeTextures: [...(props.excludeTextures || []), tex1, tex2],
+			},
+			exclude: [tex1, tex2],
 		},
-		view3,
-		tex3,
-		width,
-		height,
 	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
 	args.pass.end();
 
 	// 4. Draw Channel 4 (if connected)
@@ -441,19 +329,10 @@ export const ChannelMergerWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		],
 	});
 
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"load",
-	);
+	const finalPass = beginTargetPass(args);
 
 	finalPass.setPipeline(pipeline);
 	finalPass.setBindGroup(0, uniformBindGroup);
 	finalPass.setBindGroup(1, textureBindGroup);
 	finalPass.draw(4, 1, 0, 0);
-
-	args.pass = finalPass;
 };

@@ -1,5 +1,6 @@
 import type { RenderContextValue } from "../render-context.js";
 import { textureCache } from "../texture-cache.js";
+import { createImageTexture } from "./image-texture.js";
 import type { ImageNodeProps } from "./types.js";
 
 interface LoadedImageData {
@@ -95,29 +96,7 @@ export async function drawImageNode(
 			// Check the cache again in case another concurrent render task already created and cached the texture!
 			tex = textureCache.acquire(props.src);
 			if (!tex) {
-				tex = ctx.device.createTexture({
-					size: [data.width, data.height],
-					format: "rgba8unorm",
-					usage:
-						GPUTextureUsage.TEXTURE_BINDING |
-						GPUTextureUsage.COPY_DST |
-						GPUTextureUsage.RENDER_ATTACHMENT,
-				});
-
-				if (data.bitmap) {
-					ctx.device.queue.copyExternalImageToTexture(
-						{ source: data.bitmap },
-						{ texture: tex },
-						[data.width, data.height],
-					);
-				} else if (data.buffer) {
-					ctx.device.queue.writeTexture(
-						{ texture: tex },
-						data.buffer,
-						{ bytesPerRow: data.width * 4 },
-						[data.width, data.height],
-					);
-				}
+				tex = createImageTexture(ctx.device, data);
 
 				textureCache.set(props.src, tex, ctx.device);
 			}

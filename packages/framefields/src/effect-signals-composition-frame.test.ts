@@ -1,21 +1,8 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { Canvas, loadImage } from "skia-canvas";
 import { describe, expect, it } from "vitest";
 import { Blur, Composition, Layer, Signal, Vignette } from "./index.js";
-
-async function decodePngPixels(pngBuffer: Buffer) {
-	const img = await loadImage(pngBuffer);
-	const canvas = new Canvas(img.width, img.height);
-	const ctx = canvas.getContext("2d");
-	ctx.drawImage(img, 0, 0);
-	const imgData = ctx.getImageData(0, 0, img.width, img.height);
-	return {
-		width: img.width,
-		height: img.height,
-		pixels: imgData.data,
-	};
-}
+import { decodePngPixels } from "./test-utils/pixels.js";
 
 const testVideoPath = resolve(
 	import.meta.dirname,

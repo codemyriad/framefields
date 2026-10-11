@@ -2,6 +2,14 @@
 
 import { getActiveMediaMetadata } from "@framefields/core";
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	beginTargetPass,
+	createFullscreenPipeline,
+	drawChildToTexture,
+	drawFullscreenPass,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+} from "@framefields/node-sdk/gpu";
 
 interface ResizerScalerOp {
 	op: "ResizerScaler";
@@ -41,27 +49,7 @@ struct ScalerUniforms {
 @group(0) @binding(0) var<uniform> u : ScalerUniforms;
 @group(0) @binding(1) var s : sampler;
 @group(0) @binding(2) var t_src : texture_2d<f32>;
-
-struct VSOut {
-    @builtin(position) pos : vec4<f32>,
-    @location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
     let uv = in.uv;
@@ -161,25 +149,11 @@ function getDeviceLayouts(device: GPUDevice): DeviceScalerResources {
 	let res = deviceResourceCache.get(device);
 	if (res) return res;
 
-	const scalerUniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-			{
-				binding: 2,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-		],
-	});
+	const scalerUniformLayout = fragmentBindGroupLayout(device, [
+		"uniform",
+		"sampler",
+		"texture",
+	]);
 
 	res = {
 		scalerUniformLayout,
@@ -201,18 +175,11 @@ function getScalerResources(device: GPUDevice, format: GPUTextureFormat) {
 			code: RESIZER_SCALER_SHADER,
 		});
 
-		pipeline = device.createRenderPipeline({
+		pipeline = createFullscreenPipeline(device, {
 			label: `ResizerScalerPipeline_${format}`,
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [layouts.scalerUniformLayout],
-			}),
-			vertex: { module: scalerModule, entryPoint: "vs" },
-			fragment: {
-				module: scalerModule,
-				entryPoint: "fs",
-				targets: [{ format }],
-			},
-			primitive: { topology: "triangle-strip" },
+			module: scalerModule,
+			layouts: [layouts.scalerUniformLayout],
+			format,
 		});
 		layouts.pipelineCache.set(cacheKey, pipeline);
 	}
@@ -250,17 +217,8 @@ function parseHexToRGBA(hex: string): [number, number, number, number] {
 const scalerData = new Float32Array(24);
 
 export const ResizerScalerWebGPURenderer: WebGPUNodeRenderer = async (args) => {
-	const {
-		ctx,
-		encoder,
-		pass,
-		targetView,
-		targetTexture,
-		targetWidth,
-		targetHeight,
-		props,
-		drawChild,
-	} = args;
+	const { ctx, encoder, pass, targetView, targetWidth, targetHeight, props } =
+		args;
 
 	const op = props.virtualMedia?.operation as ResizerScalerOp | undefined;
 	if (op?.op !== "ResizerScaler" || !op) return;
@@ -276,41 +234,16 @@ export const ResizerScalerWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const srcHeight = childMeta?.height || targetHeight || 1080;
 
 	// Get a temporary texture representing the native child size to draw it into
-	const tmpTex = ctx.renderer.getTemporaryTexture(srcWidth, srcHeight, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const tmpView = tmpTex.createView();
-
-	// Clear temporary texture frame
-	const childPass = ctx.renderer.beginFrame(
-		encoder,
-		tmpView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		srcWidth,
-		srcHeight,
-		"clear",
-	);
-	childPass.end();
-
-	// Draw child media in native size
-	ctx.renderer.pushScissor({ x: 0, y: 0, width: srcWidth, height: srcHeight });
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		childMedia,
-		{
+	const { view: tmpView } = await drawChildToTexture(args, childMedia, {
+		width: srcWidth,
+		height: srcHeight,
+		props: {
 			...props,
 			virtualMedia: childMedia,
 			containerWidth: srcWidth,
 			containerHeight: srcHeight,
 		},
-		tmpView,
-		tmpTex,
-		srcWidth,
-		srcHeight,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	});
 
 	// Get compiled shader pipeline
 	const { scalerPipeline: pipeline, scalerUniformLayout: uLayout } =
@@ -383,20 +316,7 @@ export const ResizerScalerWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const sampler = ctx.renderer.samplerCache.getSampler(ctx.device);
 
 	// Render into targetView
-	const renderPass = encoder.beginRenderPass({
-		colorAttachments: [
-			{
-				view: targetView,
-				loadOp: "clear",
-				storeOp: "store",
-				clearValue: { r: 0, g: 0, b: 0, a: 0 },
-			},
-		],
-	});
-
-	renderPass.setPipeline(pipeline);
-	renderPass.setBindGroup(
-		0,
+	drawFullscreenPass(encoder, targetView, pipeline, [
 		ctx.device.createBindGroup({
 			layout: uLayout,
 			entries: [
@@ -405,20 +325,8 @@ export const ResizerScalerWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 				{ binding: 2, resource: tmpView },
 			],
 		}),
-	);
-
-	renderPass.draw(4);
-	renderPass.end();
+	]);
 
 	// Create and return load render pass to continue downstream node executions
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		targetWidth,
-		targetHeight,
-		"load",
-	);
-
-	args.pass = finalPass;
+	beginTargetPass(args);
 };

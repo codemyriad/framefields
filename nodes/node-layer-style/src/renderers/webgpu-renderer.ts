@@ -1,6 +1,14 @@
 /// <reference types="webgpu" />
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
 import {
+	createFullscreenPipeline,
+	drawFullscreenPass,
+	drawTextureToTarget,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+	PREMULTIPLIED_BLEND,
+} from "@framefields/node-sdk/gpu";
+import {
 	computeLayerStylePadding,
 	type LayerStyleNodeConfig,
 } from "../shared/config.js";
@@ -145,27 +153,7 @@ struct LayerStyleUniforms {
 @group(0) @binding(0) var<uniform> u : LayerStyleUniforms;
 @group(1) @binding(0) var tex        : texture_2d<f32>;
 @group(1) @binding(1) var samp       : sampler;
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 fn sampleAlpha(uv: vec2<f32>) -> f32 {
 	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
@@ -652,65 +640,19 @@ function getLayerStyleResources(
 		code: WGSL_LAYER_STYLE_SHADER,
 	});
 
-	const uniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
+	const uniformLayout = fragmentBindGroupLayout(device, ["uniform"]);
 
-	const textureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
+	const textureLayout = fragmentBindGroupLayout(device, ["texture", "sampler"]);
 
 	const pipelineLayout = device.createPipelineLayout({
 		bindGroupLayouts: [uniformLayout, textureLayout],
 	});
 
-	const pipeline = device.createRenderPipeline({
-		layout: pipelineLayout,
-		vertex: {
-			module,
-			entryPoint: "vs",
-		},
-		fragment: {
-			module,
-			entryPoint: "fs",
-			targets: [
-				{
-					format,
-					blend: {
-						color: {
-							srcFactor: "one",
-							dstFactor: "one-minus-src-alpha",
-							operation: "add",
-						},
-						alpha: {
-							srcFactor: "one",
-							dstFactor: "one-minus-src-alpha",
-							operation: "add",
-						},
-					},
-				},
-			],
-		},
-		primitive: {
-			topology: "triangle-strip",
-		},
+	const pipeline = createFullscreenPipeline(device, {
+		module,
+		layouts: pipelineLayout,
+		format,
+		blend: PREMULTIPLIED_BLEND,
 	});
 
 	res = { pipeline, uniformLayout, textureLayout };
@@ -725,7 +667,6 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		ctx,
 		encoder,
 		pass,
-		targetView,
 		targetTexture,
 		targetWidth,
 		targetHeight,
@@ -1152,39 +1093,11 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		...(props.excludeTextures || []),
 	]);
 
-	const renderPass = encoder.beginRenderPass({
-		colorAttachments: [
-			{
-				view: outTex.createView(),
-				loadOp: "clear",
-				storeOp: "store",
-				clearValue: { r: 0, g: 0, b: 0, a: 0 },
-			},
-		],
-	});
-
-	renderPass.setPipeline(pipeline);
-	renderPass.setBindGroup(0, uBindGroup);
-	renderPass.setBindGroup(1, tBindGroup);
-	renderPass.draw(4);
-	renderPass.end();
+	drawFullscreenPass(encoder, outTex.createView(), pipeline, [
+		uBindGroup,
+		tBindGroup,
+	]);
 
 	// Blit to targetView
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		targetWidth,
-		targetHeight,
-		"load",
-	);
-
-	ctx.renderer.drawTexture(
-		finalPass,
-		outTex,
-		{ x: 0, y: 0, width: targetWidth, height: targetHeight },
-		{ opacity: op.opacity ?? 1.0 },
-	);
-
-	args.pass = finalPass;
+	drawTextureToTarget(args, outTex, op.opacity ?? 1.0);
 };

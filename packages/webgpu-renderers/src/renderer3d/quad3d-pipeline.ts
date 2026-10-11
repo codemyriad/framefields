@@ -1,7 +1,12 @@
 import { BufferPool } from "../renderer2d/buffer-pool.js";
 import { quad3dWgsl } from "../shaders/quad3d.js";
 import { fullCoverageView, matteLayoutEntry } from "./matte3d.js";
-import { BloomPipelineVariants } from "./pipeline-variants.js";
+import {
+	BloomPipelineVariants,
+	createBasePipelines,
+	type PipelineVariantBase,
+	writeModelTransform,
+} from "./pipeline-variants.js";
 import { SHADOW_DEPTH_STENCIL } from "./shadow-depth.js";
 import {
 	packSurfaceParams,
@@ -191,87 +196,7 @@ export class Quad3DPipeline {
 			],
 		};
 
-		// 1. Single color target pipeline
-		this.pipelineSingle = device.createRenderPipeline({
-			label: "Quad3DPipelineSingle",
-			layout: pipelineLayout,
-			vertex: vertexState,
-			fragment: {
-				module,
-				entryPoint: "fs_single",
-				targets: [
-					{
-						format,
-						blend: {
-							color: {
-								srcFactor: "one",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-							alpha: {
-								srcFactor: "one",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-						},
-					},
-				],
-			},
-			depthStencil: {
-				format: depthFormat,
-				depthWriteEnabled: true,
-				depthCompare: "less-equal",
-			},
-			primitive: {
-				topology: "triangle-list",
-				cullMode: "none",
-			},
-			multisample: { count: sampleCount },
-		});
-
-		// 2. MRT pipeline (Color + Linear Depth)
-		this.pipelineMrt = device.createRenderPipeline({
-			label: "Quad3DPipelineMrt",
-			layout: pipelineLayout,
-			vertex: vertexState,
-			fragment: {
-				module,
-				entryPoint: "fs_mrt",
-				targets: [
-					{
-						format,
-						blend: {
-							color: {
-								srcFactor: "one",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-							alpha: {
-								srcFactor: "one",
-								dstFactor: "one-minus-src-alpha",
-								operation: "add",
-							},
-						},
-					},
-					{
-						format: "rgba16float", // Linear depth attachment
-					},
-				],
-			},
-			depthStencil: {
-				format: depthFormat,
-				depthWriteEnabled: true,
-				depthCompare: "less-equal",
-			},
-			primitive: {
-				topology: "triangle-list",
-				cullMode: "none",
-			},
-			multisample: { count: sampleCount },
-		});
-
-		// Unit quad centered at origin: [-0.5, -0.5] to [0.5, 0.5] with normal [0, 0, -1]
-		this.bloomVariants = new BloomPipelineVariants(device, {
+		const base: PipelineVariantBase = {
 			label: "Quad3DPipeline",
 			layout: pipelineLayout,
 			vertex: vertexState,
@@ -284,7 +209,11 @@ export class Quad3DPipeline {
 			},
 			primitive: { topology: "triangle-list", cullMode: "none" },
 			multisample: { count: sampleCount },
-		});
+		};
+		const { single, mrt } = createBasePipelines(device, base);
+		this.pipelineSingle = single;
+		this.pipelineMrt = mrt;
+		this.bloomVariants = new BloomPipelineVariants(device, base);
 
 		this.pipelineShadow = device.createRenderPipeline({
 			label: "Quad3DPipelineShadow",
@@ -330,21 +259,12 @@ export class Quad3DPipeline {
 	}
 
 	private packModel(data: ModelUniformData): GPUBindGroup {
-		const mat = data.modelMatrix;
-		for (let i = 0; i < 16; i++) {
-			this.modelData[i] = mat[i] ?? 0;
-		}
-
-		const norm = data.normalMatrix ?? mat;
-		for (let i = 0; i < 16; i++) {
-			this.modelData[16 + i] = norm[i] ?? 0;
-		}
-
-		const tint = data.colorTint ?? [1, 1, 1, 1];
-		this.modelData[32] = tint[0];
-		this.modelData[33] = tint[1];
-		this.modelData[34] = tint[2];
-		this.modelData[35] = tint[3];
+		writeModelTransform(
+			this.modelData,
+			data.modelMatrix,
+			data.normalMatrix,
+			data.colorTint,
+		);
 
 		const bColor = data.borderColor ?? [0, 0, 0, 0];
 		this.modelData[36] = bColor[0];

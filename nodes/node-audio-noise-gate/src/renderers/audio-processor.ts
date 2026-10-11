@@ -1,4 +1,8 @@
-import { type AudioProcessor, resolveNumber } from "@framefields/node-sdk";
+import {
+	type AudioProcessor,
+	isHandleConnected,
+	resolveNumber,
+} from "@framefields/node-sdk";
 import { WebGPUAudioProcessor } from "@framefields/webgpu-renderers";
 
 const PARAM_ORDER = ["threshold", "attack", "hold", "release", "range"];
@@ -238,11 +242,6 @@ export const noiseGateAudioProcessor: AudioProcessor = async (
 	}
 
 	const op = (virtualMedia.operation as Record<string, unknown>) || {};
-	const inputs =
-		(op.inputs as Record<
-			string,
-			{ connectionValid?: boolean; outputItem?: { type?: string } }
-		>) || {};
 
 	const threshold = resolveNumber(op.threshold, -40);
 	const attack = resolveNumber(op.attack, 0.005);
@@ -252,23 +251,13 @@ export const noiseGateAudioProcessor: AudioProcessor = async (
 
 	const closedGain = range <= -96 ? 0 : 10 ** (range / 20);
 
-	const isHandleConnected = (handleIdKey: string): boolean => {
-		const handleId = op[handleIdKey];
-		if (typeof handleId !== "string" || !handleId) return false;
-		const input = inputs[handleId];
-		return Boolean(
-			input?.connectionValid &&
-				input.outputItem &&
-				(input.outputItem.type === "Signal" ||
-					input.outputItem.type === "Number"),
-		);
-	};
-
-	const hasThresholdSig = isHandleConnected("thresholdHandleId") ? 1.0 : 0.0;
-	const hasAttackSig = isHandleConnected("attackHandleId") ? 1.0 : 0.0;
-	const hasHoldSig = isHandleConnected("holdHandleId") ? 1.0 : 0.0;
-	const hasReleaseSig = isHandleConnected("releaseHandleId") ? 1.0 : 0.0;
-	const hasRangeSig = isHandleConnected("rangeHandleId") ? 1.0 : 0.0;
+	const hasThresholdSig = isHandleConnected(op, "thresholdHandleId")
+		? 1.0
+		: 0.0;
+	const hasAttackSig = isHandleConnected(op, "attackHandleId") ? 1.0 : 0.0;
+	const hasHoldSig = isHandleConnected(op, "holdHandleId") ? 1.0 : 0.0;
+	const hasReleaseSig = isHandleConnected(op, "releaseHandleId") ? 1.0 : 0.0;
+	const hasRangeSig = isHandleConnected(op, "rangeHandleId") ? 1.0 : 0.0;
 
 	const numChannels = channels.length;
 	if (numChannels === 0) return;

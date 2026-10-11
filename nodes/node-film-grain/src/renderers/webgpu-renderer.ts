@@ -1,6 +1,16 @@
 /// <reference types="webgpu" />
 import type { SignalData } from "@framefields/core";
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	drawChildToTexture,
+	drawFullscreenPass,
+	drawTextureToTarget,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+	perDevice,
+	signalTiming,
+} from "@framefields/node-sdk/gpu";
 import { signalRegistry } from "@framefields/webgpu-renderers";
 
 interface FilmGrainOp {
@@ -52,27 +62,7 @@ struct FilmUniforms {
 @group(1) @binding(1) var samp       : sampler;
 @group(2) @binding(0) var signalTex  : texture_2d<f32>;
 @group(2) @binding(1) var signalSamp : sampler;
-
-struct VSOut {
-    @builtin(position) pos : vec4<f32>,
-    @location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-    var pos = array<vec2<f32>, 4>(
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(1.0, -1.0)
-    );
-    var uv = array<vec2<f32>, 4>(
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(1.0, 0.0),
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 1.0)
-    );
-    return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 fn hash2D(p: vec2<f32>) -> f32 {
     var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
@@ -171,69 +161,14 @@ fn frameJitter(frameIndex: f32) -> vec2<f32> {
 }
 `;
 
-interface DeviceFilmGrainResources {
-	filmUniformLayout: GPUBindGroupLayout;
-	singleTextureLayout: GPUBindGroupLayout;
-	signalTextureLayout: GPUBindGroupLayout;
-	pipelineCache: Map<string, GPURenderPipeline>;
-}
-
-const deviceResourceCache = new WeakMap<GPUDevice, DeviceFilmGrainResources>();
 const filmGrainUniformData = new Float32Array(12);
 
-function getDeviceLayouts(device: GPUDevice): DeviceFilmGrainResources {
-	let res = deviceResourceCache.get(device);
-	if (res) return res;
-
-	const filmUniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
-
-	const singleTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-
-	const signalTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-
-	res = {
-		filmUniformLayout,
-		singleTextureLayout,
-		signalTextureLayout,
-		pipelineCache: new Map(),
-	};
-	deviceResourceCache.set(device, res);
-	return res;
-}
+const getDeviceLayouts = perDevice((device) => ({
+	filmUniformLayout: fragmentBindGroupLayout(device, ["uniform"]),
+	singleTextureLayout: fragmentBindGroupLayout(device, ["texture", "sampler"]),
+	signalTextureLayout: fragmentBindGroupLayout(device, ["texture", "sampler"]),
+	pipelineCache: new Map<string, GPURenderPipeline>(),
+}));
 
 function getFilmGrainResources(device: GPUDevice, format: GPUTextureFormat) {
 	const layouts = getDeviceLayouts(device);
@@ -246,22 +181,15 @@ function getFilmGrainResources(device: GPUDevice, format: GPUTextureFormat) {
 			code: FILM_GRAIN_SHADER,
 		});
 
-		pipeline = device.createRenderPipeline({
+		pipeline = createFullscreenPipeline(device, {
 			label: `FilmGrainPipeline_${format}`,
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [
-					layouts.filmUniformLayout,
-					layouts.singleTextureLayout,
-					layouts.signalTextureLayout,
-				],
-			}),
-			vertex: { module: filmModule, entryPoint: "vs" },
-			fragment: {
-				module: filmModule,
-				entryPoint: "fs",
-				targets: [{ format }],
-			},
-			primitive: { topology: "triangle-strip" },
+			module: filmModule,
+			layouts: [
+				layouts.filmUniformLayout,
+				layouts.singleTextureLayout,
+				layouts.signalTextureLayout,
+			],
+			format,
 		});
 		layouts.pipelineCache.set(cacheKey, pipeline);
 	}
@@ -279,12 +207,10 @@ export const FilmGrainWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		ctx,
 		encoder,
 		pass,
-		targetView,
 		targetTexture,
 		targetWidth,
 		targetHeight,
 		props,
-		drawChild,
 	} = args;
 
 	const frame = props.frame ?? 0;
@@ -360,34 +286,7 @@ export const FilmGrainWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	}
 
 	// 1. Draw input child to temporary texture
-	const tmpTex = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const tmpView = tmpTex.createView();
-
-	const childPass = ctx.renderer.beginFrame(
-		encoder,
-		tmpView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	childPass.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		childMedia,
-		{ ...props, virtualMedia: childMedia },
-		tmpView,
-		tmpTex,
-		width,
-		height,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	const { texture: tmpTex } = await drawChildToTexture(args, childMedia);
 
 	// End any active pass from drawing child
 	args.pass.end();
@@ -404,13 +303,7 @@ export const FilmGrainWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 
 	// Fetch dynamic signal texture view on-demand
 	let signalView: GPUTextureView;
-	const elapsedSeconds =
-		props.elapsedMs !== undefined ? props.elapsedMs / 1000 : frame / fps;
-	const durationSeconds = props.virtualMedia?.metadata?.durationMs
-		? props.virtualMedia.metadata.durationMs / 1000
-		: props.durationMs !== undefined
-			? props.durationMs / 1000
-			: 0;
+	const { elapsedSeconds, durationSeconds } = signalTiming(props, frame, fps);
 
 	if (hasStaticSignal && sd) {
 		signalView = signalRegistry.getOrCreate2DTextureView(
@@ -462,36 +355,17 @@ export const FilmGrainWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	]);
 
 	// 5. Run single-pass Film Grain shader
-	const filmPass = encoder.beginRenderPass({
-		colorAttachments: [
-			{
-				view: outTex.createView(),
-				loadOp: "clear",
-				storeOp: "store",
-				clearValue: { r: 0, g: 0, b: 0, a: 0 },
-			},
-		],
-	});
-
-	filmPass.setPipeline(pipeline);
-	filmPass.setBindGroup(
-		0,
+	drawFullscreenPass(encoder, outTex.createView(), pipeline, [
 		ctx.device.createBindGroup({
 			layout: uLayout,
 			entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
 		}),
-	);
-	filmPass.setBindGroup(
-		1,
 		ctx.renderer.bindGroupCache.getBindGroup(
 			ctx.device,
 			tLayout,
 			tmpTex,
 			sampler,
 		),
-	);
-	filmPass.setBindGroup(
-		2,
 		ctx.device.createBindGroup({
 			layout: sigLayout,
 			entries: [
@@ -499,26 +373,8 @@ export const FilmGrainWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 				{ binding: 1, resource: sampler },
 			],
 		}),
-	);
-	filmPass.draw(4);
-	filmPass.end();
+	]);
 
 	// 6. Draw results to final targetView using opacity blend
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		targetWidth,
-		targetHeight,
-		"load",
-	);
-
-	ctx.renderer.drawTexture(
-		finalPass,
-		outTex,
-		{ x: 0, y: 0, width: targetWidth, height: targetHeight },
-		{ opacity: resolveVal(op.opacity, 1.0) },
-	);
-
-	args.pass = finalPass;
+	drawTextureToTarget(args, outTex, resolveVal(op.opacity, 1.0));
 };

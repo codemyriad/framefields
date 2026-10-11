@@ -1,6 +1,14 @@
 /// <reference types="webgpu" />
 import type { VirtualMediaData } from "@framefields/core";
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	drawChildToTexture,
+	drawFullscreenPass,
+	drawTextureToTarget,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+} from "@framefields/node-sdk/gpu";
 import { probeVideoSize } from "@framefields/webgpu-renderers";
 import { rotatedSourceSize } from "../shared/config.js";
 
@@ -32,27 +40,7 @@ struct RotateUniforms {
 @group(0) @binding(0) var<uniform> u : RotateUniforms;
 @group(1) @binding(0) var tex        : texture_2d<f32>;
 @group(1) @binding(1) var samp       : sampler;
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
 	let p = (in.uv - vec2<f32>(0.5)) * u.outSize;
@@ -84,45 +72,16 @@ function getRotateResources(
 	const cached = deviceResourceCache.get(device);
 	if (cached) return cached;
 
-	const uniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
+	const uniformLayout = fragmentBindGroupLayout(device, ["uniform"]);
 
-	const textureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
+	const textureLayout = fragmentBindGroupLayout(device, ["texture", "sampler"]);
 
 	const shaderModule = device.createShaderModule({ code: WGSL_ROTATE_SHADER });
 
-	const pipeline = device.createRenderPipeline({
-		layout: device.createPipelineLayout({
-			bindGroupLayouts: [uniformLayout, textureLayout],
-		}),
-		vertex: { module: shaderModule, entryPoint: "vs" },
-		fragment: {
-			module: shaderModule,
-			entryPoint: "fs",
-			// The pass clears and writes every pixel: no blending needed.
-			targets: [{ format: targetFormat }],
-		},
-		primitive: { topology: "triangle-strip" },
+	const pipeline = createFullscreenPipeline(device, {
+		module: shaderModule,
+		layouts: [uniformLayout, textureLayout],
+		format: targetFormat,
 	});
 
 	const res: DeviceRotateResources = { uniformLayout, textureLayout, pipeline };
@@ -182,12 +141,10 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		ctx,
 		encoder,
 		pass,
-		targetView,
 		targetTexture,
 		targetWidth,
 		targetHeight,
 		props,
-		drawChild,
 	} = args;
 
 	const op = props.virtualMedia?.operation as RotateOp | undefined;
@@ -209,44 +166,16 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const sourceHeight = intrinsic?.height ?? props.containerHeight ?? height;
 
 	// 1. Render the child upright into an offscreen texture at its own size
-	const childTex = ctx.renderer.getTemporaryTexture(sourceWidth, sourceHeight, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const childView = childTex.createView();
-
-	const childPass = ctx.renderer.beginFrame(
-		encoder,
-		childView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		sourceWidth,
-		sourceHeight,
-		"clear",
-	);
-	childPass.end();
-
-	ctx.renderer.pushScissor({
-		x: 0,
-		y: 0,
+	const { texture: childTex } = await drawChildToTexture(args, childMedia, {
 		width: sourceWidth,
 		height: sourceHeight,
-	});
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		childMedia,
-		{
+		props: {
 			...props,
 			containerWidth: sourceWidth,
 			containerHeight: sourceHeight,
 			virtualMedia: childMedia,
 		},
-		childView,
-		childTex,
-		sourceWidth,
-		sourceHeight,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	});
 
 	// 2. Rotate it into the output
 	const angle = resolveNumber(op.angle, 90, compositionFrame, fps);
@@ -303,37 +232,10 @@ export const WebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		...(props.excludeTextures || []),
 	]);
 
-	const renderPass = encoder.beginRenderPass({
-		colorAttachments: [
-			{
-				view: outTex.createView(),
-				loadOp: "clear",
-				storeOp: "store",
-				clearValue: { r: 0, g: 0, b: 0, a: 0 },
-			},
-		],
-	});
-	renderPass.setPipeline(pipeline);
-	renderPass.setBindGroup(0, uBindGroup);
-	renderPass.setBindGroup(1, tBindGroup);
-	renderPass.draw(4);
-	renderPass.end();
+	drawFullscreenPass(encoder, outTex.createView(), pipeline, [
+		uBindGroup,
+		tBindGroup,
+	]);
 
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		targetWidth,
-		targetHeight,
-		"load",
-	);
-
-	ctx.renderer.drawTexture(
-		finalPass,
-		outTex,
-		{ x: 0, y: 0, width: targetWidth, height: targetHeight },
-		{ opacity: op.opacity ?? 1.0 },
-	);
-
-	args.pass = finalPass;
+	drawTextureToTarget(args, outTex, op.opacity ?? 1.0);
 };

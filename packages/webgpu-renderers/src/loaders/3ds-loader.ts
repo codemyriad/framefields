@@ -1,6 +1,6 @@
 import fs from "node:fs";
-import { type Vec3, Vector3Math } from "../math3d/index.js";
 import type { LoadModelOptions, Material3D, Mesh3DData, Model3DData } from "./types.js";
+import { accumulateVertexNormals, computeBounds, createIndexArray, resolveModelTransform, transformModelBounds, transformPositions } from "./mesh-utils.js";
 
 // 3DS Chunk IDs
 const CHUNK_MAIN = 0x4d4d;
@@ -236,111 +236,21 @@ export class ThreeDSLoader {
 		materials: Record<string, Material3D>,
 		options: LoadModelOptions,
 	): Model3DData {
-		let minX = Infinity, minY = Infinity, minZ = Infinity;
-		let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-
-		for (const m of rawMeshes) {
-			for (let i = 0; i < m.positions.length; i += 3) {
-				const x = m.positions[i]!;
-				const y = m.positions[i + 1]!;
-				const z = m.positions[i + 2]!;
-				if (x < minX) minX = x;
-				if (x > maxX) maxX = x;
-				if (y < minY) minY = y;
-				if (y > maxY) maxY = y;
-				if (z < minZ) minZ = z;
-				if (z > maxZ) maxZ = z;
-			}
-		}
-
-		if (!Number.isFinite(minX)) {
-			minX = minY = minZ = 0;
-			maxX = maxY = maxZ = 0;
-		}
-
-		const centerX = (minX + maxX) * 0.5;
-		const centerY = (minY + maxY) * 0.5;
-		const centerZ = (minZ + maxZ) * 0.5;
-
-		const sizeX = maxX - minX;
-		const sizeY = maxY - minY;
-		const sizeZ = maxZ - minZ;
-		const maxDimension = Math.max(sizeX, sizeY, sizeZ, 0.0001);
-
-		let scaleMultiplier = 1.0;
-		if (options.normalizeSize && options.normalizeSize > 0) {
-			scaleMultiplier = options.normalizeSize / maxDimension;
-		}
-
-		let scaleX = scaleMultiplier;
-		let scaleY = scaleMultiplier;
-		let scaleZ = scaleMultiplier;
-		if (typeof options.scale === "number") {
-			scaleX *= options.scale;
-			scaleY *= options.scale;
-			scaleZ *= options.scale;
-		} else if (Array.isArray(options.scale)) {
-			scaleX *= options.scale[0];
-			scaleY *= options.scale[1];
-			scaleZ *= options.scale[2];
-		}
-
-		const offsetX = options.center ? centerX : 0;
-		const offsetY = options.center ? centerY : 0;
-		const offsetZ = options.center ? centerZ : 0;
+		const bounds = computeBounds(...rawMeshes.map((m) => m.positions));
+		const transform = resolveModelTransform(bounds, options);
 
 		const meshes: Mesh3DData[] = rawMeshes.map((m, idx) => {
-			const positions = new Float32Array(m.positions.length);
-			for (let i = 0; i < m.positions.length; i += 3) {
-				positions[i] = (m.positions[i]! - offsetX) * scaleX;
-				positions[i + 1] = (m.positions[i + 1]! - offsetY) * scaleY;
-				positions[i + 2] = (m.positions[i + 2]! - offsetZ) * scaleZ;
-			}
+			const positions = transformPositions(m.positions, transform);
 
 			// Compute vertex normals
 			const normals = new Float32Array(m.positions.length);
-			for (let i = 0; i < m.indices.length; i += 3) {
-				const i0 = m.indices[i]!;
-				const i1 = m.indices[i + 1]!;
-				const i2 = m.indices[i + 2]!;
-
-				const p0: Vec3 = [positions[i0 * 3]!, positions[i0 * 3 + 1]!, positions[i0 * 3 + 2]!];
-				const p1: Vec3 = [positions[i1 * 3]!, positions[i1 * 3 + 1]!, positions[i1 * 3 + 2]!];
-				const p2: Vec3 = [positions[i2 * 3]!, positions[i2 * 3 + 1]!, positions[i2 * 3 + 2]!];
-
-				const e1 = Vector3Math.subtract(p1, p0);
-				const e2 = Vector3Math.subtract(p2, p0);
-				const fn = Vector3Math.cross(e1, e2);
-
-				normals[i0 * 3] += fn[0];
-				normals[i0 * 3 + 1] += fn[1];
-				normals[i0 * 3 + 2] += fn[2];
-
-				normals[i1 * 3] += fn[0];
-				normals[i1 * 3 + 1] += fn[1];
-				normals[i1 * 3 + 2] += fn[2];
-
-				normals[i2 * 3] += fn[0];
-				normals[i2 * 3 + 1] += fn[1];
-				normals[i2 * 3 + 2] += fn[2];
-			}
-
-			for (let i = 0; i < normals.length; i += 3) {
-				const nx = normals[i]!;
-				const ny = normals[i + 1]!;
-				const nz = normals[i + 2]!;
-				const len = Math.hypot(nx, ny, nz) || 1.0;
-				normals[i] = nx / len;
-				normals[i + 1] = ny / len;
-				normals[i + 2] = nz / len;
-			}
+			accumulateVertexNormals(positions, m.indices, normals);
 
 			const uvs = m.uvs.length === (m.positions.length / 3) * 2
 				? new Float32Array(m.uvs)
 				: new Float32Array((m.positions.length / 3) * 2);
 
-			const isLarge = positions.length / 3 > 65535;
-			const indexArray = isLarge ? new Uint32Array(m.indices) : new Uint16Array(m.indices);
+			const indexArray = createIndexArray(m.indices, positions.length / 3);
 
 			return {
 				id: `3ds_mesh_${idx}`,
@@ -353,25 +263,13 @@ export class ThreeDSLoader {
 			};
 		});
 
-		const finalMinX = (minX - offsetX) * scaleX;
-		const finalMinY = (minY - offsetY) * scaleY;
-		const finalMinZ = (minZ - offsetZ) * scaleZ;
-		const finalMaxX = (maxX - offsetX) * scaleX;
-		const finalMaxY = (maxY - offsetY) * scaleY;
-		const finalMaxZ = (maxZ - offsetZ) * scaleZ;
 
 		return {
 			name: "3DS_Model",
 			meshes,
 			materials,
 			animations: [],
-			bounds: {
-				min: [finalMinX, finalMinY, finalMinZ],
-				max: [finalMaxX, finalMaxY, finalMaxZ],
-				center: [(finalMinX + finalMaxX) * 0.5, (finalMinY + finalMaxY) * 0.5, (finalMinZ + finalMaxZ) * 0.5],
-				size: [finalMaxX - finalMinX, finalMaxY - finalMinY, finalMaxZ - finalMinZ],
-				boundingSphereRadius: Math.hypot(finalMaxX - finalMinX, finalMaxY - finalMinY, finalMaxZ - finalMinZ) * 0.5,
-			},
+			bounds: transformModelBounds(bounds, transform),
 		};
 	}
 

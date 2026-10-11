@@ -1,32 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-// Polyfill WebGPU globals for the test runner environment
-if (typeof globalThis.GPUBufferUsage === "undefined") {
-	globalThis.GPUBufferUsage = {
-		MAP_READ: 1,
-		MAP_WRITE: 2,
-		COPY_SRC: 4,
-		COPY_DST: 8,
-		INDEX: 16,
-		VERTEX: 32,
-		UNIFORM: 64,
-		STORAGE: 128,
-		INDIRECT: 256,
-		QUERY_RESOLVE: 512,
-	} as unknown as typeof GPUBufferUsage;
-}
-
-if (typeof globalThis.GPUTextureUsage === "undefined") {
-	globalThis.GPUTextureUsage = {
-		COPY_SRC: 1,
-		COPY_DST: 2,
-		TEXTURE_BINDING: 4,
-		STORAGE_BINDING: 8,
-		RENDER_ATTACHMENT: 16,
-	} as unknown as typeof GPUTextureUsage;
-}
+installGPUUsageGlobals();
 
 import { SignalRegistry } from "./signal-registry.js";
+import { installGPUUsageGlobals } from "./test-helpers.js";
 
 describe("SignalRegistry", () => {
 	it("should allocate, cache, and reuse 1D buffers", () => {

@@ -5,6 +5,7 @@ import {
 	createMockDevice,
 	createMockTexture,
 	ensureDOMGlobals,
+	installMockGPUFlags,
 } from "./test-helpers.js";
 
 describe("Motion Graphics Pipeline", () => {
@@ -17,21 +18,7 @@ describe("Motion Graphics Pipeline", () => {
 
 	beforeEach(() => {
 		mockDevice = createMockDevice();
-		globalThis.GPUBufferUsage = {
-			UNIFORM: 1,
-			VERTEX: 2,
-			COPY_DST: 4,
-		} as any;
-		globalThis.GPUShaderStage = {
-			VERTEX: 1,
-			FRAGMENT: 2,
-		} as any;
-		globalThis.GPUTextureUsage = {
-			TEXTURE_BINDING: 1,
-			COPY_DST: 2,
-			RENDER_ATTACHMENT: 4,
-			COPY_SRC: 8,
-		} as any;
+		installMockGPUFlags();
 
 		renderer = new Renderer2D(mockDevice, "rgba8unorm");
 	});
@@ -47,17 +34,11 @@ describe("Motion Graphics Pipeline", () => {
 				600,
 			);
 
-			renderer.drawPath(
-				pass,
-				"M 0 0 L 100 0 L 100 100",
-				"#ffffff",
-				4,
-				{
-					trimStart: 0,
-					trimEnd: 0.5,
-					strokeLineCap: "round",
-				},
-			);
+			renderer.drawPath(pass, "M 0 0 L 100 0 L 100 100", "#ffffff", 4, {
+				trimStart: 0,
+				trimEnd: 0.5,
+				strokeLineCap: "round",
+			});
 
 			expect(pass.draw).toHaveBeenCalled();
 		});
@@ -72,26 +53,14 @@ describe("Motion Graphics Pipeline", () => {
 				600,
 			);
 
-			renderer.drawPath(
-				pass,
-				"M 10 10 L 50 50",
-				"#ff0000",
-				6,
-				{
-					strokeLineCap: "butt",
-				},
-			);
+			renderer.drawPath(pass, "M 10 10 L 50 50", "#ff0000", 6, {
+				strokeLineCap: "butt",
+			});
 			expect(pass.draw).toHaveBeenCalled();
 
-			renderer.drawPath(
-				pass,
-				"M 10 10 L 50 50",
-				"#00ff00",
-				6,
-				{
-					strokeLineCap: "square",
-				},
-			);
+			renderer.drawPath(pass, "M 10 10 L 50 50", "#00ff00", 6, {
+				strokeLineCap: "square",
+			});
 			expect(pass.draw).toHaveBeenCalled();
 		});
 	});

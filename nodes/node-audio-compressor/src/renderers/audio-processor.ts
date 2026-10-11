@@ -1,4 +1,8 @@
-import { type AudioProcessor, resolveNumber } from "@framefields/node-sdk";
+import {
+	type AudioProcessor,
+	isHandleConnected,
+	resolveNumber,
+} from "@framefields/node-sdk";
 import { WebGPUAudioProcessor } from "@framefields/webgpu-renderers";
 
 const PARAM_ORDER = [
@@ -211,11 +215,6 @@ export const compressorAudioProcessor: AudioProcessor = async (
 	}
 
 	const op = (virtualMedia.operation as Record<string, unknown>) || {};
-	const inputs =
-		(op.inputs as Record<
-			string,
-			{ connectionValid?: boolean; outputItem?: { type?: string } }
-		>) || {};
 
 	const threshold = resolveNumber(op.threshold, -24);
 	const ratio = resolveNumber(op.ratio, 4);
@@ -224,24 +223,16 @@ export const compressorAudioProcessor: AudioProcessor = async (
 	const knee = resolveNumber(op.knee, 6);
 	const makeupGain = resolveNumber(op.makeupGain, 0);
 
-	const isHandleConnected = (handleIdKey: string): boolean => {
-		const handleId = op[handleIdKey];
-		if (typeof handleId !== "string" || !handleId) return false;
-		const input = inputs[handleId];
-		return Boolean(
-			input?.connectionValid &&
-				input.outputItem &&
-				(input.outputItem.type === "Signal" ||
-					input.outputItem.type === "Number"),
-		);
-	};
-
-	const hasThresholdSig = isHandleConnected("thresholdHandleId") ? 1.0 : 0.0;
-	const hasRatioSig = isHandleConnected("ratioHandleId") ? 1.0 : 0.0;
-	const hasAttackSig = isHandleConnected("attackHandleId") ? 1.0 : 0.0;
-	const hasReleaseSig = isHandleConnected("releaseHandleId") ? 1.0 : 0.0;
-	const hasKneeSig = isHandleConnected("kneeHandleId") ? 1.0 : 0.0;
-	const hasMakeupGainSig = isHandleConnected("makeupGainHandleId") ? 1.0 : 0.0;
+	const hasThresholdSig = isHandleConnected(op, "thresholdHandleId")
+		? 1.0
+		: 0.0;
+	const hasRatioSig = isHandleConnected(op, "ratioHandleId") ? 1.0 : 0.0;
+	const hasAttackSig = isHandleConnected(op, "attackHandleId") ? 1.0 : 0.0;
+	const hasReleaseSig = isHandleConnected(op, "releaseHandleId") ? 1.0 : 0.0;
+	const hasKneeSig = isHandleConnected(op, "kneeHandleId") ? 1.0 : 0.0;
+	const hasMakeupGainSig = isHandleConnected(op, "makeupGainHandleId")
+		? 1.0
+		: 0.0;
 
 	const numChannels = channels.length;
 	if (numChannels === 0) return;

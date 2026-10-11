@@ -1,3 +1,4 @@
+import { solveHomography } from "@framefields/node-sdk";
 import { describe, expect, it } from "vitest";
 import {
 	type CompilerVirtualMedia,
@@ -6,7 +7,6 @@ import {
 import {
 	has3DTransform,
 	type Point2D,
-	solveHomography,
 	Transform3DMath,
 } from "./transform3d.js";
 

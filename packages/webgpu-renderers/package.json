@@ -16,6 +16,18 @@
 			"development": "./src/index.ts",
 			"import": "./dist/index.mjs",
 			"default": "./dist/index.mjs"
+		},
+		"./text-animations": {
+			"types": "./dist/text-animations/index.d.mts",
+			"development": "./src/text-animations/index.ts",
+			"import": "./dist/text-animations/index.mjs",
+			"default": "./dist/text-animations/index.mjs"
+		},
+		"./math3d": {
+			"types": "./dist/math3d/index.d.mts",
+			"development": "./src/math3d/index.ts",
+			"import": "./dist/math3d/index.mjs",
+			"default": "./dist/math3d/index.mjs"
 		}
 	},
 	"files": [

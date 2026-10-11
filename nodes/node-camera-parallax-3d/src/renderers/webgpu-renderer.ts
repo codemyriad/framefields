@@ -1,6 +1,19 @@
 /// <reference types="webgpu" />
 import type { SignalData, VirtualMediaData } from "@framefields/core";
-import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	resolveSignalField,
+	type WebGPUNodeRenderer,
+} from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	drawChildToTexture,
+	drawFullscreenPass,
+	drawTextureToTarget,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+	perDevice,
+	texturesLayout,
+} from "@framefields/node-sdk/gpu";
 import { signalRegistry } from "@framefields/webgpu-renderers";
 
 interface CameraParallax3DOp {
@@ -103,27 +116,7 @@ struct CameraParallaxUniforms {
 @group(3) @binding(6) var fovSigTex          : texture_2d<f32>;
 @group(3) @binding(7) var edgeDilationSigTex : texture_2d<f32>;
 @group(3) @binding(8) var sigSamp            : sampler;
-
-struct VSOut {
-    @builtin(position) pos : vec4<f32>,
-    @location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-    var pos = array<vec2<f32>, 4>(
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(1.0, -1.0)
-    );
-    var uv = array<vec2<f32>, 4>(
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(1.0, 0.0),
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 1.0)
-    );
-    return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 fn sampleDepth(uv: vec2<f32>) -> f32 {
     let clampedUV = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
@@ -344,123 +337,13 @@ fn sampleAlbedo(uv: vec2<f32>) -> vec4<f32> {
 }
 `;
 
-interface DeviceCameraParallaxResources {
-	uniformLayout: GPUBindGroupLayout;
-	srcTextureLayout: GPUBindGroupLayout;
-	depthTextureLayout: GPUBindGroupLayout;
-	signalTextureLayout: GPUBindGroupLayout;
-	pipelineCache: Map<string, GPURenderPipeline>;
-}
-
-const deviceResourceCache = new WeakMap<
-	GPUDevice,
-	DeviceCameraParallaxResources
->();
-
-function getDeviceLayouts(device: GPUDevice): DeviceCameraParallaxResources {
-	let res = deviceResourceCache.get(device);
-	if (res) return res;
-
-	const uniformLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				buffer: { type: "uniform" },
-			},
-		],
-	});
-
-	const srcTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-
-	const depthTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-
-	const signalTextureLayout = device.createBindGroupLayout({
-		entries: [
-			{
-				binding: 0,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 1,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 2,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 3,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 4,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 5,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 6,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 7,
-				visibility: GPUShaderStage.FRAGMENT,
-				texture: { sampleType: "float" },
-			},
-			{
-				binding: 8,
-				visibility: GPUShaderStage.FRAGMENT,
-				sampler: { type: "filtering" },
-			},
-		],
-	});
-
-	res = {
-		uniformLayout,
-		srcTextureLayout,
-		depthTextureLayout,
-		signalTextureLayout,
-		pipelineCache: new Map(),
-	};
-	deviceResourceCache.set(device, res);
-	return res;
-}
+const getDeviceLayouts = perDevice((device) => ({
+	uniformLayout: fragmentBindGroupLayout(device, ["uniform"]),
+	srcTextureLayout: fragmentBindGroupLayout(device, ["texture", "sampler"]),
+	depthTextureLayout: fragmentBindGroupLayout(device, ["texture", "sampler"]),
+	signalTextureLayout: texturesLayout(device, 8),
+	pipelineCache: new Map<string, GPURenderPipeline>(),
+}));
 
 function getCameraParallaxResources(
 	device: GPUDevice,
@@ -476,23 +359,16 @@ function getCameraParallaxResources(
 			code: CAMERA_PARALLAX_SHADER,
 		});
 
-		pipeline = device.createRenderPipeline({
+		pipeline = createFullscreenPipeline(device, {
 			label: `CameraParallaxPipeline_${format}`,
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [
-					layouts.uniformLayout,
-					layouts.srcTextureLayout,
-					layouts.depthTextureLayout,
-					layouts.signalTextureLayout,
-				],
-			}),
-			vertex: { module, entryPoint: "vs" },
-			fragment: {
-				module,
-				entryPoint: "fs",
-				targets: [{ format }],
-			},
-			primitive: { topology: "triangle-strip" },
+			module,
+			layouts: [
+				layouts.uniformLayout,
+				layouts.srcTextureLayout,
+				layouts.depthTextureLayout,
+				layouts.signalTextureLayout,
+			],
+			format,
 		});
 
 		layouts.pipelineCache.set(cacheKey, pipeline);
@@ -507,55 +383,6 @@ function getCameraParallaxResources(
 	};
 }
 
-function resolveSignalField(
-	op: CameraParallax3DOp,
-	fieldName:
-		| "panX"
-		| "panY"
-		| "dollyZ"
-		| "fov"
-		| "parallaxAmount"
-		| "dofAperture"
-		| "focusPlane"
-		| "edgeDilation",
-	defaultValue: number,
-	minVal: number,
-	maxVal: number,
-): { hasSignal: boolean; sd: CameraParallaxSignalData | null; value: number } {
-	const handleIdKey = `${fieldName}HandleId` as keyof CameraParallax3DOp;
-	const handleId = op[handleIdKey] as string | null | undefined;
-	const signalInput = handleId ? op.inputs?.[handleId] : null;
-
-	const hasSignal = !!(
-		signalInput?.connectionValid &&
-		(signalInput.outputItem?.type === "Signal" ||
-			signalInput.outputItem?.type === "Numeric")
-	);
-	const sd =
-		hasSignal && signalInput?.outputItem?.data
-			? (signalInput.outputItem.data as CameraParallaxSignalData)
-			: null;
-
-	let value = defaultValue;
-	if (!hasSignal) {
-		if (
-			signalInput?.connectionValid &&
-			signalInput.outputItem?.type === "Number"
-		) {
-			const raw = Number(signalInput.outputItem.data ?? defaultValue);
-			value = Math.max(minVal, Math.min(maxVal, raw));
-		} else {
-			const raw = Number(op[fieldName] ?? defaultValue);
-			value = Math.max(minVal, Math.min(maxVal, raw));
-		}
-	} else if (sd) {
-		const raw = Number(sd.offset ?? defaultValue);
-		value = Math.max(minVal, Math.min(maxVal, raw));
-	}
-
-	return { hasSignal, sd, value };
-}
-
 export const CameraParallax3DWebGPURenderer: WebGPUNodeRenderer = async (
 	args,
 ) => {
@@ -563,12 +390,10 @@ export const CameraParallax3DWebGPURenderer: WebGPUNodeRenderer = async (
 		ctx,
 		encoder,
 		pass,
-		targetView,
 		targetTexture,
 		targetWidth,
 		targetHeight,
 		props,
-		drawChild,
 	} = args;
 
 	const frame = props.frame ?? 0;
@@ -587,39 +412,14 @@ export const CameraParallax3DWebGPURenderer: WebGPUNodeRenderer = async (
 	const height = targetHeight;
 
 	// 1. Draw input source child to temporary texture
-	const srcTex = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const srcView = srcTex.createView();
-
-	const srcClearPass = ctx.renderer.beginFrame(
-		encoder,
-		srcView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	srcClearPass.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		sourceMedia,
-		{
+	const { texture: srcTex } = await drawChildToTexture(args, sourceMedia, {
+		props: {
 			...props,
 			virtualMedia: sourceMedia,
 			containerWidth: width,
 			containerHeight: height,
 		},
-		srcView,
-		srcTex,
-		width,
-		height,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	});
 
 	// End active pass from child drawing
 	args.pass.end();
@@ -627,51 +427,24 @@ export const CameraParallax3DWebGPURenderer: WebGPUNodeRenderer = async (
 	// 2. Draw depth map if provided
 	const depthMedia = op.depthMedia;
 	let depthTex: GPUTexture;
-	let depthView: GPUTextureView;
 	let hasDepthMap = false;
 
 	if (depthMedia) {
-		depthTex = ctx.renderer.getTemporaryTexture(width, height, [
-			...(props.excludeTextures || []),
-			targetTexture,
-			srcTex,
-		]);
-		depthView = depthTex.createView();
-
-		const depthClearPass = ctx.renderer.beginFrame(
-			encoder,
-			depthView,
-			{ r: 0, g: 0, b: 0, a: 0 },
-			width,
-			height,
-			"clear",
-		);
-		depthClearPass.end();
-
-		ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-		ctx.renderer.pushIdentity();
-		await drawChild(
-			depthMedia,
-			{
+		({ texture: depthTex } = await drawChildToTexture(args, depthMedia, {
+			props: {
 				...props,
 				virtualMedia: depthMedia,
 				containerWidth: width,
 				containerHeight: height,
 			},
-			depthView,
-			depthTex,
-			width,
-			height,
-		);
-		ctx.renderer.popTransform();
-		ctx.renderer.popScissor();
+			exclude: [srcTex],
+		}));
 
 		// End active pass from depth drawing
 		args.pass.end();
 		hasDepthMap = true;
 	} else {
 		depthTex = srcTex;
-		depthView = srcView;
 		hasDepthMap = false;
 	}
 
@@ -702,14 +475,56 @@ export const CameraParallax3DWebGPURenderer: WebGPUNodeRenderer = async (
 			? (elapsedSeconds % durationSeconds) / durationSeconds
 			: 0.0;
 
-	const panXInfo = resolveSignalField(op, "panX", 0.0, -1.0, 1.0);
-	const panYInfo = resolveSignalField(op, "panY", 0.0, -1.0, 1.0);
-	const dollyZInfo = resolveSignalField(op, "dollyZ", 0.0, -1.0, 1.0);
-	const fovInfo = resolveSignalField(op, "fov", 50.0, 15.0, 120.0);
-	const parallaxInfo = resolveSignalField(op, "parallaxAmount", 0.6, 0.0, 2.0);
-	const apertureInfo = resolveSignalField(op, "dofAperture", 0.3, 0.0, 1.0);
-	const focusPlaneInfo = resolveSignalField(op, "focusPlane", 0.4, 0.0, 1.0);
-	const edgeDilationInfo = resolveSignalField(
+	const panXInfo = resolveSignalField<CameraParallaxSignalData>(
+		op,
+		"panX",
+		0.0,
+		-1.0,
+		1.0,
+	);
+	const panYInfo = resolveSignalField<CameraParallaxSignalData>(
+		op,
+		"panY",
+		0.0,
+		-1.0,
+		1.0,
+	);
+	const dollyZInfo = resolveSignalField<CameraParallaxSignalData>(
+		op,
+		"dollyZ",
+		0.0,
+		-1.0,
+		1.0,
+	);
+	const fovInfo = resolveSignalField<CameraParallaxSignalData>(
+		op,
+		"fov",
+		50.0,
+		15.0,
+		120.0,
+	);
+	const parallaxInfo = resolveSignalField<CameraParallaxSignalData>(
+		op,
+		"parallaxAmount",
+		0.6,
+		0.0,
+		2.0,
+	);
+	const apertureInfo = resolveSignalField<CameraParallaxSignalData>(
+		op,
+		"dofAperture",
+		0.3,
+		0.0,
+		1.0,
+	);
+	const focusPlaneInfo = resolveSignalField<CameraParallaxSignalData>(
+		op,
+		"focusPlane",
+		0.4,
+		0.0,
+		1.0,
+	);
+	const edgeDilationInfo = resolveSignalField<CameraParallaxSignalData>(
 		op,
 		"edgeDilation",
 		0.5,
@@ -813,45 +628,23 @@ export const CameraParallax3DWebGPURenderer: WebGPUNodeRenderer = async (
 		...(props.excludeTextures || []),
 	]);
 
-	const renderPass = encoder.beginRenderPass({
-		colorAttachments: [
-			{
-				view: outTex.createView(),
-				loadOp: "clear",
-				storeOp: "store",
-				clearValue: { r: 0, g: 0, b: 0, a: 0 },
-			},
-		],
-	});
-
-	renderPass.setPipeline(pipeline);
-	renderPass.setBindGroup(
-		0,
+	drawFullscreenPass(encoder, outTex.createView(), pipeline, [
 		ctx.device.createBindGroup({
 			layout: uLayout,
 			entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
 		}),
-	);
-	renderPass.setBindGroup(
-		1,
 		ctx.renderer.bindGroupCache.getBindGroup(
 			ctx.device,
 			srcLayout,
 			srcTex,
 			sampler,
 		),
-	);
-	renderPass.setBindGroup(
-		2,
 		ctx.renderer.bindGroupCache.getBindGroup(
 			ctx.device,
 			depthLayout,
 			depthTex,
 			sampler,
 		),
-	);
-	renderPass.setBindGroup(
-		3,
 		ctx.device.createBindGroup({
 			layout: sigLayout,
 			entries: [
@@ -866,26 +659,8 @@ export const CameraParallax3DWebGPURenderer: WebGPUNodeRenderer = async (
 				{ binding: 8, resource: sampler },
 			],
 		}),
-	);
-
-	renderPass.draw(4);
-	renderPass.end();
+	]);
 
 	// 7. Final Pass to targetView
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		targetWidth,
-		targetHeight,
-		"load",
-	);
-	ctx.renderer.drawTexture(
-		finalPass,
-		outTex,
-		{ x: 0, y: 0, width: targetWidth, height: targetHeight },
-		{ opacity: op.opacity ?? 1 },
-	);
-
-	args.pass = finalPass;
+	drawTextureToTarget(args, outTex, op.opacity ?? 1);
 };

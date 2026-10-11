@@ -23,6 +23,12 @@
 			"development": "./renderer/index.ts",
 			"import": "./dist/renderer.mjs",
 			"default": "./dist/renderer.mjs"
+		},
+		"./gpu": {
+			"types": "./dist/gpu.d.mts",
+			"development": "./renderer/gpu.ts",
+			"import": "./dist/gpu.mjs",
+			"default": "./dist/gpu.mjs"
 		}
 	},
 	"files": [

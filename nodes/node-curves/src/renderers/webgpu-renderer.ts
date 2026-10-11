@@ -1,5 +1,13 @@
 /// <reference types="webgpu" />
 import type { WebGPUNodeRenderer } from "@framefields/node-sdk";
+import {
+	createFullscreenPipeline,
+	drawChildToTexture,
+	drawFullscreenPass,
+	drawTextureToTarget,
+	FULLSCREEN_QUAD_WGSL,
+	fragmentBindGroupLayout,
+} from "@framefields/node-sdk/gpu";
 import { solveMonotonicSpline } from "../shared/spline.js";
 import { computeHistogramFromEncoder } from "./histogram-computer.js";
 
@@ -12,26 +20,7 @@ const LUT_BYTES_PER_ROW = LUT_SIZE * 4; // 4 bytes per rgba8unorm texel
 
 // ─── RGB Curves Shader ────────────────────────────────────────────────────────
 const CURVES_RGB_SHADER = /* wgsl */ `
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0, 1.0),
-		vec2<f32>(1.0, 1.0),
-		vec2<f32>(-1.0, -1.0),
-		vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0),
-		vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0),
-		vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 @group(0) @binding(0) var t_lut : texture_2d<f32>;
 @group(0) @binding(1) var s_lut : sampler;
@@ -67,12 +56,6 @@ struct Uniforms {
 	pad1: u32,
 	pad2: u32,
 };
-
-struct VSOut {
-	@builtin(position) pos : vec4<f32>,
-	@location(0) uv        : vec2<f32>,
-};
-
 @group(0) @binding(0) var<uniform> u : Uniforms;
 @group(0) @binding(1) var t_lut      : texture_2d<f32>;
 @group(0) @binding(2) var s_lut      : sampler;
@@ -80,17 +63,7 @@ struct VSOut {
 @group(1) @binding(0) var t_src : texture_2d<f32>;
 @group(1) @binding(1) var s_src : sampler;
 
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
-	var pos = array<vec2<f32>, 4>(
-		vec2<f32>(-1.0,  1.0), vec2<f32>(1.0,  1.0),
-		vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0)
-	);
-	var uv = array<vec2<f32>, 4>(
-		vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0),
-		vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0)
-	);
-	return VSOut(vec4<f32>(pos[vi], 0.0, 1.0), uv[vi]);
-}
+${FULLSCREEN_QUAD_WGSL}
 
 fn rgb_to_hsl(rgb: vec3<f32>) -> vec3<f32> {
 	let r = rgb.r; let g = rgb.g; let b = rgb.b;
@@ -190,46 +163,17 @@ function getRgbResources(
 ): RgbCurvesResources {
 	let res = rgbResourceCache.get(device);
 	if (!res) {
-		const lutBGL = device.createBindGroupLayout({
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.FRAGMENT,
-					texture: { sampleType: "float" },
-				},
-				{
-					binding: 1,
-					visibility: GPUShaderStage.FRAGMENT,
-					sampler: { type: "filtering" },
-				},
-			],
-		});
-		const srcBGL = device.createBindGroupLayout({
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.FRAGMENT,
-					texture: { sampleType: "float" },
-				},
-				{
-					binding: 1,
-					visibility: GPUShaderStage.FRAGMENT,
-					sampler: { type: "filtering" },
-				},
-			],
-		});
+		const lutBGL = fragmentBindGroupLayout(device, ["texture", "sampler"]);
+		const srcBGL = fragmentBindGroupLayout(device, ["texture", "sampler"]);
 		const module = device.createShaderModule({
 			label: "curves-rgb.wgsl",
 			code: CURVES_RGB_SHADER,
 		});
-		const pipeline = device.createRenderPipeline({
+		const pipeline = createFullscreenPipeline(device, {
 			label: "CurvesRgbPipeline",
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [lutBGL, srcBGL],
-			}),
-			vertex: { module, entryPoint: "vs" },
-			fragment: { module, entryPoint: "fs", targets: [{ format }] },
-			primitive: { topology: "triangle-strip" },
+			module,
+			layouts: [lutBGL, srcBGL],
+			format,
 		});
 		res = { pipeline, lutBindGroupLayout: lutBGL, srcBindGroupLayout: srcBGL };
 		rgbResourceCache.set(device, res);
@@ -243,51 +187,21 @@ function getHslResources(
 ): HslCurvesResources {
 	let res = hslResourceCache.get(device);
 	if (!res) {
-		const uniformLayout = device.createBindGroupLayout({
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.FRAGMENT,
-					buffer: { type: "uniform" },
-				},
-				{
-					binding: 1,
-					visibility: GPUShaderStage.FRAGMENT,
-					texture: { sampleType: "float" },
-				},
-				{
-					binding: 2,
-					visibility: GPUShaderStage.FRAGMENT,
-					sampler: { type: "filtering" },
-				},
-			],
-		});
-		const srcBGL = device.createBindGroupLayout({
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.FRAGMENT,
-					texture: { sampleType: "float" },
-				},
-				{
-					binding: 1,
-					visibility: GPUShaderStage.FRAGMENT,
-					sampler: { type: "filtering" },
-				},
-			],
-		});
+		const uniformLayout = fragmentBindGroupLayout(device, [
+			"uniform",
+			"texture",
+			"sampler",
+		]);
+		const srcBGL = fragmentBindGroupLayout(device, ["texture", "sampler"]);
 		const module = device.createShaderModule({
 			label: "curves-hsl.wgsl",
 			code: CURVES_HSL_SHADER,
 		});
-		const pipeline = device.createRenderPipeline({
+		const pipeline = createFullscreenPipeline(device, {
 			label: "CurvesHslPipeline",
-			layout: device.createPipelineLayout({
-				bindGroupLayouts: [uniformLayout, srcBGL],
-			}),
-			vertex: { module, entryPoint: "vs" },
-			fragment: { module, entryPoint: "fs", targets: [{ format }] },
-			primitive: { topology: "triangle-strip" },
+			module,
+			layouts: [uniformLayout, srcBGL],
+			format,
 		});
 		res = { pipeline, uniformLayout, srcBindGroupLayout: srcBGL };
 		hslResourceCache.set(device, res);
@@ -322,7 +236,10 @@ function getLut(
 	const texture = build();
 	cache.set(configKey, texture);
 	if (cache.size > LUT_CACHE_LIMIT) {
-		const [oldestKey, oldest] = cache.entries().next().value as [string, GPUTexture];
+		const [oldestKey, oldest] = cache.entries().next().value as [
+			string,
+			GPUTexture,
+		];
 		cache.delete(oldestKey);
 		oldest.destroy();
 	}
@@ -434,12 +351,10 @@ export const CurvesWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 		ctx,
 		encoder,
 		pass,
-		targetView,
 		targetTexture,
 		targetWidth,
 		targetHeight,
 		props,
-		drawChild,
 	} = args;
 
 	const op = props.virtualMedia?.operation as Record<string, unknown> & {
@@ -456,33 +371,7 @@ export const CurvesWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 	const curveType = (op.curveType as string) || "rgb";
 
 	// ── Capture child input frame ───────────────────────────────────────────
-	const tmpTex = ctx.renderer.getTemporaryTexture(width, height, [
-		...(props.excludeTextures || []),
-		targetTexture,
-	]);
-	const tmpView = tmpTex.createView();
-	const childPass = ctx.renderer.beginFrame(
-		encoder,
-		tmpView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		width,
-		height,
-		"clear",
-	);
-	childPass.end();
-
-	ctx.renderer.pushScissor({ x: 0, y: 0, width, height });
-	ctx.renderer.pushIdentity();
-	await drawChild(
-		childMedia,
-		{ ...props, virtualMedia: childMedia },
-		tmpView,
-		tmpTex,
-		width,
-		height,
-	);
-	ctx.renderer.popTransform();
-	ctx.renderer.popScissor();
+	const { texture: tmpTex } = await drawChildToTexture(args, childMedia);
 
 	// ── LUT / grading pass ──────────────────────────────────────────────────
 	const sampler = ctx.renderer.samplerCache.getSampler(ctx.device);
@@ -500,22 +389,12 @@ export const CurvesWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 			green: op.green,
 			blue: op.blue,
 		});
-		const lut = getLut(ctx.device, configKey, () => buildRgbLut(ctx.device, op));
+		const lut = getLut(ctx.device, configKey, () =>
+			buildRgbLut(ctx.device, op),
+		);
 		const { pipeline, lutBindGroupLayout, srcBindGroupLayout } =
 			getRgbResources(ctx.device, ctx.renderer.format);
-		const renderPass = encoder.beginRenderPass({
-			colorAttachments: [
-				{
-					view: outTex.createView(),
-					loadOp: "clear",
-					storeOp: "store",
-					clearValue: { r: 0, g: 0, b: 0, a: 0 },
-				},
-			],
-		});
-		renderPass.setPipeline(pipeline);
-		renderPass.setBindGroup(
-			0,
+		drawFullscreenPass(encoder, outTex.createView(), pipeline, [
 			ctx.device.createBindGroup({
 				layout: lutBindGroupLayout,
 				entries: [
@@ -523,18 +402,13 @@ export const CurvesWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 					{ binding: 1, resource: sampler },
 				],
 			}),
-		);
-		renderPass.setBindGroup(
-			1,
 			ctx.renderer.bindGroupCache.getBindGroup(
 				ctx.device,
 				srcBindGroupLayout,
 				tmpTex,
 				sampler,
 			),
-		);
-		renderPass.draw(4);
-		renderPass.end();
+		]);
 	} else {
 		const hslCurveKey = HSL_CURVE_KEY_MAP[curveType];
 		const hslPoints = (op[hslCurveKey] as { x: number; y: number }[]) || [
@@ -542,7 +416,9 @@ export const CurvesWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 			{ x: 1, y: 0.5 },
 		];
 		const configKey = JSON.stringify({ curveType, points: hslPoints });
-		const lut = getLut(ctx.device, configKey, () => buildHslLut(ctx.device, hslPoints));
+		const lut = getLut(ctx.device, configKey, () =>
+			buildHslLut(ctx.device, hslPoints),
+		);
 		const uniformData = new Uint32Array([
 			HSL_MODE_MAP[curveType] ?? 0,
 			0,
@@ -554,19 +430,7 @@ export const CurvesWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 			ctx.device,
 			ctx.renderer.format,
 		);
-		const renderPass = encoder.beginRenderPass({
-			colorAttachments: [
-				{
-					view: outTex.createView(),
-					loadOp: "clear",
-					storeOp: "store",
-					clearValue: { r: 0, g: 0, b: 0, a: 0 },
-				},
-			],
-		});
-		renderPass.setPipeline(pipeline);
-		renderPass.setBindGroup(
-			0,
+		drawFullscreenPass(encoder, outTex.createView(), pipeline, [
 			ctx.device.createBindGroup({
 				layout: uniformLayout,
 				entries: [
@@ -575,37 +439,18 @@ export const CurvesWebGPURenderer: WebGPUNodeRenderer = async (args) => {
 					{ binding: 2, resource: sampler },
 				],
 			}),
-		);
-		renderPass.setBindGroup(
-			1,
 			ctx.renderer.bindGroupCache.getBindGroup(
 				ctx.device,
 				srcBindGroupLayout,
 				tmpTex,
 				sampler,
 			),
-		);
-		renderPass.draw(4);
-		renderPass.end();
+		]);
 	}
 
 	// ── Histogram compute — runs in the SAME encoder so outTex data is valid ─
 	computeHistogramFromEncoder(ctx.device, encoder, outTex, nodeId);
 
 	// ── Final composite to target ──────────────────────────────────────────
-	const finalPass = ctx.renderer.beginFrame(
-		encoder,
-		targetView,
-		{ r: 0, g: 0, b: 0, a: 0 },
-		targetWidth,
-		targetHeight,
-		"load",
-	);
-	ctx.renderer.drawTexture(
-		finalPass,
-		outTex,
-		{ x: 0, y: 0, width: targetWidth, height: targetHeight },
-		{ opacity: props.opacity ?? 1 },
-	);
-	(args as Record<string, unknown>).pass = finalPass;
+	drawTextureToTarget(args, outTex, props.opacity ?? 1);
 };
