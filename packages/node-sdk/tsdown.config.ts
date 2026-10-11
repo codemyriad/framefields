@@ -5,6 +5,7 @@ export default defineConfig({
 		index: "index.ts",
 		renderer: "renderer/index.ts",
 		gpu: "renderer/gpu.ts",
+		testing: "testing/index.ts",
 	},
 	format: ["esm"],
 	dts: true,

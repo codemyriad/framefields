@@ -29,6 +29,12 @@
 			"development": "./renderer/gpu.ts",
 			"import": "./dist/gpu.mjs",
 			"default": "./dist/gpu.mjs"
+		},
+		"./testing": {
+			"types": "./dist/testing.d.mts",
+			"development": "./testing/index.ts",
+			"import": "./dist/testing.mjs",
+			"default": "./dist/testing.mjs"
 		}
 	},
 	"files": [
