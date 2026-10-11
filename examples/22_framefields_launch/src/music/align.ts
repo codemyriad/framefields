@@ -130,7 +130,7 @@ interface Span {
 
 /**
  * One way to consume tokens: lyric words `di` and heard words `dj`, timed
- * from the heard words. Transcribers split and merge words ("Get framed" for
+ * from the heard words. Transcribers split and merge words ("Frame fields" for
  * "Framefields", "byFrame" for "by frame"), so 2:1 and 1:2 pairings count too.
  */
 interface Move {

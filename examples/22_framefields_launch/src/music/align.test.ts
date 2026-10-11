@@ -16,8 +16,8 @@ describe("alignLyrics", () => {
 		const words = alignLyrics(
 			[section(["Framefields! No browser"])],
 			[
-				{ text: "Get", start: 1, end: 1.2 },
-				{ text: "framed!", start: 1.2, end: 1.6 },
+				{ text: "Frame", start: 1, end: 1.2 },
+				{ text: "fields!", start: 1.2, end: 1.6 },
 				{ text: "No", start: 2, end: 2.1 },
 				{ text: "browser", start: 2.1, end: 2.5 },
 			],
