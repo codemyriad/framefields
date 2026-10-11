@@ -1,5 +1,7 @@
 # @framefields/node-relight-3d
 
+## 2.0.11
+
 ## 2.0.10
 
 ## 2.0.9
