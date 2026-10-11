@@ -5,6 +5,8 @@ export * from "./node-metadata.js";
 export * from "./render-diagnostics.js";
 export * from "./signals/index.js";
 export * from "./types/index.js";
+export * from "./utils/color.js";
+export * from "./utils/gradient.js";
 export * from "./utils/is-equal.js";
 export * from "./utils/result-cache.js";
 export * from "./utils/svg.js";

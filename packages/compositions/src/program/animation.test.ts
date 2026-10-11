@@ -156,3 +156,53 @@ describe("LayerAnimation.keys", () => {
 		expect(anim.tracks[0]!.keyframes.map((k) => k.frame)).toEqual([0, 10]);
 	});
 });
+
+describe("LayerAnimation track merging", () => {
+	it("replaces a key on an occupied frame instead of duplicating it", () => {
+		const anim = LayerAnimation.create().keys("y", [
+			[0, 0],
+			[10, 5],
+			[10, 8],
+		]);
+		expect(anim.tracks[0].keyframes.map((k) => [k.frame, k.value])).toEqual([
+			[0, 0],
+			[10, 8],
+		]);
+	});
+
+	it("merges behaviours authored separately into one sorted track per prop", () => {
+		const enter = LayerAnimation.keys("y", [
+			[0, -300],
+			[20, 0],
+		]);
+		const press = LayerAnimation.keys("y", [
+			[40, 0],
+			[42, 6],
+			[48, 0],
+		]).keys("opacity", [[0, 1]]);
+		const wave = LayerAnimation.create()
+			.keys("y", [
+				[48, 2],
+				[60, -18],
+			])
+			.wiggle("x", { amplitude: 4 });
+		const merged = LayerAnimation.merge(enter, press, wave);
+		const y = merged.tracks.filter((t) => t.prop === "y");
+		expect(y).toHaveLength(1);
+		expect(y[0].keyframes.map((k) => [k.frame, k.value])).toEqual([
+			[0, -300],
+			[20, 0],
+			[40, 0],
+			[42, 6],
+			[48, 2],
+			[60, -18],
+		]);
+		expect(merged.tracks.map((t) => t.prop).sort()).toEqual([
+			"opacity",
+			"x",
+			"y",
+		]);
+		// Inputs are left untouched.
+		expect(enter.tracks[0].keyframes).toHaveLength(2);
+	});
+});

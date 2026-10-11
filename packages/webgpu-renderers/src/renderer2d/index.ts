@@ -19,8 +19,8 @@ import { SolidPipeline } from "./solid-pipeline.js";
 import { TransformStack } from "./transform-stack.js";
 
 export * from "./path-geometry.js";
-export * from "./shape-fill-pipeline.js";
 export type { PathDrawOpts } from "./path-pipeline.js";
+export * from "./shape-fill-pipeline.js";
 
 export interface Rect {
 	x: number;
@@ -71,7 +71,11 @@ export type BlendMode =
 	| "destination-atop"
 	| "lighter"
 	| "copy"
-	| "xor";
+	| "xor"
+	/** Keeps the base where the overlay is bright (luma matte). */
+	| "luma-in"
+	/** Keeps the base where the overlay is dark (inverted luma matte). */
+	| "luma-out";
 
 export interface DrawOpts {
 	opacity?: number;

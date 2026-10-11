@@ -1,9 +1,11 @@
 import { parseColor } from "../color.js";
+import { GRADIENT_UNIFORM_FLOATS } from "../shaders/gradient.js";
 import { solidWgsl } from "../shaders/solid.js";
 import { BufferPool } from "./buffer-pool.js";
+import { asGradient, packGradientUniforms } from "./gradient-uniforms.js";
 import type { Color, DrawOpts, Rect } from "./index.js";
-import { UniformBindGroupCache } from "./uniform-bind-group-cache.js";
 import type { TransformStack } from "./transform-stack.js";
+import { UniformBindGroupCache } from "./uniform-bind-group-cache.js";
 
 export class SolidPipeline {
 	private device: GPUDevice;
@@ -12,7 +14,7 @@ export class SolidPipeline {
 	private uniformPool: BufferPool;
 	private vertexPool: BufferPool;
 	private uniformBindGroupCache = new UniformBindGroupCache();
-	private uniformData = new Float32Array(24);
+	private uniformData = new Float32Array(24 + GRADIENT_UNIFORM_FLOATS);
 	private vertexData = new Float32Array(8);
 	// Correct layout for uniformData:
 	// transformCol0: vec4 (4)
@@ -21,7 +23,8 @@ export class SolidPipeline {
 	// params: vec4 (4)
 	// color: vec4 (4)
 	// rect: vec4 (4)
-	// Total: 24 floats
+	// gradient: GradientUniforms (48)
+	// Total: 72 floats
 
 	constructor(device: GPUDevice, format: GPUTextureFormat) {
 		this.device = device;
@@ -104,7 +107,9 @@ export class SolidPipeline {
 		cornerRadius = 0,
 		opts?: DrawOpts,
 	): void {
-		const c = parseColor(color);
+		// A CSS gradient string paints the rect with that gradient.
+		const gradient = asGradient(color);
+		const c = gradient ? { r: 0, g: 0, b: 0, a: 1 } : parseColor(color);
 		const opacity = opts?.opacity ?? 1.0;
 
 		transformStack.packIntoBuffer(
@@ -126,6 +131,7 @@ export class SolidPipeline {
 		this.uniformData[21] = rect.y;
 		this.uniformData[22] = rect.width;
 		this.uniformData[23] = rect.height;
+		packGradientUniforms(gradient, rect, this.uniformData, 24);
 
 		const uniformBuffer = this.uniformPool.getBuffer(
 			this.device,

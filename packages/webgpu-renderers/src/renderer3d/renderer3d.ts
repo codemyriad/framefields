@@ -1,17 +1,5 @@
-import {
-	Camera3D,
-	type Camera3DPose,
-	Light3D,
-	type Light3DOptions,
-	LIGHT_UNIFORM_SIZE_BYTES,
-	type Mat4,
-	Matrix4Math,
-	type Vec3,
-	Vector3Math,
-} from "../math3d/index.js";
-import { BufferPool } from "../renderer2d/buffer-pool.js";
-import { SamplerCache } from "../renderer2d/sampler-cache.js";
-import { dofBokehWgsl } from "../shaders/dof-bokeh.js";
+import type { MeshAudioDeformConfig } from "@framefields/core";
+import { type Color, parseColor } from "../color.js";
 import {
 	FbxLoader,
 	GltfLoader,
@@ -34,14 +22,42 @@ import type {
 	Mesh3DData,
 	Model3DData,
 } from "../loaders/types.js";
-import { type Color, parseColor } from "../color.js";
-import { type GPUMeshBuffers, Mesh3DPipeline } from "./mesh3d-pipeline.js";
-import { Quad3DPipeline } from "./quad3d-pipeline.js";
-import { Slug3DPipeline } from "./slug3d-pipeline.js";
+import type {
+	Environment3DOptions,
+	ShadowUniformInfo,
+} from "../math3d/environment3d.js";
+import {
+	Camera3D,
+	type Camera3DPose,
+	LIGHT_UNIFORM_SIZE_BYTES,
+	Light3D,
+	type Light3DOptions,
+	type Mat4,
+	Matrix4Math,
+	type Vec3,
+	Vector3Math,
+} from "../math3d/index.js";
+import { BufferPool } from "../renderer2d/buffer-pool.js";
+import { SamplerCache } from "../renderer2d/sampler-cache.js";
+import { UniformBindGroupCache } from "../renderer2d/uniform-bind-group-cache.js";
+import { dofBokehWgsl } from "../shaders/dof-bokeh.js";
 import type { SlugGlyphBatch } from "../slug/slug-pipeline.js";
 import { AudioMeshDeformPipeline } from "./audio-mesh-deform-pipeline.js";
-import { UniformBindGroupCache } from "../renderer2d/uniform-bind-group-cache.js";
-import type { MeshAudioDeformConfig } from "@framefields/core";
+import { type BloomOptions, BloomPipeline } from "./bloom-pipeline.js";
+import {
+	type GPUMeshBuffers,
+	Mesh3DPipeline,
+	type MeshMaterialMaps,
+} from "./mesh3d-pipeline.js";
+import { Quad3DPipeline } from "./quad3d-pipeline.js";
+import { SHADOW_DEPTH_FORMAT } from "./shadow-depth.js";
+import {
+	type Aabb,
+	fitShadowFrustum,
+	transformAabb,
+} from "./shadow-frustum.js";
+import { Slug3DPipeline } from "./slug3d-pipeline.js";
+import type { SurfaceParams } from "./surface-params.js";
 
 const ADDRESS_MODES: Record<"repeat" | "clamp" | "mirror", GPUAddressMode> = {
 	repeat: "repeat",
@@ -49,7 +65,7 @@ const ADDRESS_MODES: Record<"repeat" | "clamp" | "mirror", GPUAddressMode> = {
 	mirror: "mirror-repeat",
 };
 
-export interface DrawQuad3DOpts {
+export interface DrawQuad3DOpts extends SurfaceParams {
 	/** 3D world position [x, y, z] */
 	position: [number, number, number];
 	/** Layer surface width */
@@ -92,6 +108,11 @@ export interface DrawQuad3DOpts {
 	ambientIntensity?: number;
 	/** Metallic factor [0, 1] */
 	metallic?: number;
+	/**
+	 * Screen-space track matte, the size of the pass: the layer shows where
+	 * this texture's alpha does and keeps its place in the depth buffer.
+	 */
+	matte?: GPUTexture;
 }
 
 /**
@@ -101,7 +122,12 @@ export interface DrawQuad3DOpts {
  */
 const TEXT_STACK_PULL = 5e-4;
 
-export interface DrawMesh3DOpts {
+export interface DrawMesh3DOpts extends SurfaceParams {
+	/**
+	 * Screen-space track matte, the size of the pass: the layer shows where
+	 * this texture's alpha does and keeps its place in the depth buffer.
+	 */
+	matte?: GPUTexture;
 	/** 3D world position [x, y, z] */
 	position?: Vec3;
 	/** Euler rotations in degrees [rx, ry, rz] */
@@ -128,6 +154,8 @@ export interface DrawMesh3DOpts {
 	material?: "lit" | "unlit" | "toon";
 	/** Toon shading: the shadowed side's color multiplier */
 	shadeColor?: [number, number, number];
+	/** Normal / metallic-roughness / occlusion / emissive maps (see `materialMaps`). */
+	maps?: MeshMaterialMaps;
 	/** Discard texels whose alpha is below this (glTF MASK) */
 	alphaCutoff?: number;
 	/** Texture addressing outside [0, 1] */
@@ -151,6 +179,33 @@ export interface DrawMesh3DOpts {
 	};
 }
 
+/** Scene-wide world settings for a 3D pass. */
+export interface Scene3DWorld {
+	/** Present = physically based shading (see `Environment3DOptions`). */
+	environment?: Environment3DOptions | null;
+	/** From `renderShadowMap`, when a light casts shadows. */
+	shadow?: ShadowUniformInfo | null;
+}
+
+/** Something that can fall into a shadow map. */
+export type ShadowCaster3D =
+	| {
+			kind: "mesh";
+			mesh: Mesh3DData;
+			buffers?: GPUMeshBuffers;
+			opts: DrawMesh3DOpts;
+	  }
+	| { kind: "quad"; texture: GPUTexture; opts: DrawQuad3DOpts };
+
+export interface ShadowMapOptions3D {
+	/** Texels per side. Default 2048. */
+	mapSize?: number;
+	/** Edge blur in texels. Default 2.5. */
+	softness?: number;
+	/** 0..1. Default 1. */
+	darkness?: number;
+}
+
 export class Renderer3D {
 	private device: GPUDevice;
 	public format: GPUTextureFormat;
@@ -163,22 +218,34 @@ export class Renderer3D {
 	private cameraPool: BufferPool;
 	private lightsPool: BufferPool;
 	private cameraUniformBindGroupCache = new UniformBindGroupCache();
-	private lightsUniformBindGroupCache = new UniformBindGroupCache();
 	private samplerCache = new SamplerCache();
 	private depthTexture: GPUTexture | null = null;
 	private linearDepthTexture: GPUTexture | null = null;
 	// Multisampled targets the pass draws into; they resolve into the caller's views.
 	private msaaColorTexture: GPUTexture | null = null;
 	private msaaLinearDepthTexture: GPUTexture | null = null;
+	private msaaHdrTexture: GPUTexture | null = null;
+	private hdrTexture: GPUTexture | null = null;
+	/** Whether the current pass also writes HDR radiance (bloom). */
+	private passWritesHdr = false;
 	private cameraUniformData = new Float32Array(80); // 320 bytes = 80 floats
 	private meshBuffersCache = new WeakMap<Mesh3DData, GPUMeshBuffers>();
 	private materialTextures = new WeakMap<
 		Material3D,
 		Promise<GPUTexture | undefined>
 	>();
+	private materialMapCache = new WeakMap<
+		Material3D,
+		Promise<MeshMaterialMaps>
+	>();
 	/** Parsed models by source and load options: a model file is read once, not every frame. */
 	private modelCache = new Map<string, Model3DData>();
 	private lastCameraPose: Camera3DPose | null = null;
+	private shadowTexture: GPUTexture | null = null;
+	private placeholderShadowTexture: GPUTexture | null = null;
+	private shadowSampler: GPUSampler | null = null;
+	private meshBounds = new WeakMap<Mesh3DData, Aabb>();
+	private bloomPipeline: BloomPipeline | null = null;
 	private lastCameraBuffer: GPUBuffer | null = null;
 
 	/**
@@ -279,7 +346,13 @@ export class Renderer3D {
 	}
 
 	resetPools(): void {
+		this.bloomPipeline?.resetPools();
 		this.cameraPool.reset();
+		// The cached camera buffer goes back to the pool and may be handed
+		// out again (e.g. to a shadow pass's light camera): never reuse it
+		// across a reset.
+		this.lastCameraPose = null;
+		this.lastCameraBuffer = null;
 		this.lightsPool.reset();
 		this.quad3dPipeline.resetPools();
 		this.slug3dPipeline.resetPools();
@@ -323,6 +396,29 @@ export class Renderer3D {
 			sampleCount: this.sampleCount,
 			usage: GPUTextureUsage.RENDER_ATTACHMENT,
 		});
+	}
+
+	/** The HDR radiance target the last `beginPass(…, writeHdr)` drew into. */
+	hdrSource(): GPUTexture | null {
+		return this.hdrTexture;
+	}
+
+	private getOrCreateHdrTexture(width: number, height: number): GPUTexture {
+		if (
+			!this.hdrTexture ||
+			this.hdrTexture.width !== width ||
+			this.hdrTexture.height !== height
+		) {
+			this.hdrTexture?.destroy();
+			this.hdrTexture = this.device.createTexture({
+				label: "Renderer3DHdrRadiance",
+				size: { width, height },
+				format: "rgba16float",
+				usage:
+					GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+			});
+		}
+		return this.hdrTexture;
 	}
 
 	getOrCreateLinearDepthTexture(width: number, height: number): GPUTexture {
@@ -427,9 +523,209 @@ export class Renderer3D {
 		);
 	}
 
-	public getOrCreateLightsBuffer(lights?: Light3DOptions[]): GPUBuffer {
-		const lightsData = Light3D.packLightsUniforms(lights ?? []);
+	public getOrCreateLightsBuffer(
+		lights?: Light3DOptions[],
+		world?: Scene3DWorld,
+	): GPUBuffer {
+		const lightsData = Light3D.packLightsUniforms(
+			lights ?? [],
+			world?.environment,
+			world?.shadow,
+		);
 		return this.lightsPool.getBuffer(this.device, lightsData);
+	}
+
+	/** Lights uniform + shadow map + comparison sampler (group 3 of every lit shader). */
+	private createLightsBindGroup(
+		lightsBuffer: GPUBuffer,
+		withShadow: boolean,
+	): GPUBindGroup {
+		this.shadowSampler ??= this.device.createSampler({
+			label: "ShadowComparisonSampler",
+			compare: "less-equal",
+			magFilter: "linear",
+			minFilter: "linear",
+			addressModeU: "clamp-to-edge",
+			addressModeV: "clamp-to-edge",
+		});
+		this.placeholderShadowTexture ??= this.device.createTexture({
+			label: "ShadowMapPlaceholder",
+			size: { width: 1, height: 1 },
+			format: SHADOW_DEPTH_FORMAT,
+			usage:
+				GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+		});
+		const map =
+			withShadow && this.shadowTexture
+				? this.shadowTexture
+				: this.placeholderShadowTexture;
+		return this.device.createBindGroup({
+			label: "Lights3DBindGroup",
+			layout: this.quad3dPipeline.lightsLayout,
+			entries: [
+				{ binding: 0, resource: { buffer: lightsBuffer } },
+				{ binding: 1, resource: map.createView() },
+				{ binding: 2, resource: this.shadowSampler },
+			],
+		});
+	}
+
+	/** Local bounds of a mesh, computed once. */
+	private meshAabb(mesh: Mesh3DData): Aabb {
+		let box = this.meshBounds.get(mesh);
+		if (!box) {
+			const min: Vec3 = [Infinity, Infinity, Infinity];
+			const max: Vec3 = [-Infinity, -Infinity, -Infinity];
+			const p = mesh.positions;
+			for (let i = 0; i + 2 < p.length; i += 3) {
+				for (let k = 0; k < 3; k++) {
+					const v = p[i + k];
+					if (v < min[k]) min[k] = v;
+					if (v > max[k]) max[k] = v;
+				}
+			}
+			box = Number.isFinite(min[0])
+				? { min, max }
+				: { min: [0, 0, 0], max: [0, 0, 0] };
+			this.meshBounds.set(mesh, box);
+		}
+		return box;
+	}
+
+	/** World bounds of a mesh or quad draw, for fitting shadow frusta. */
+	worldBounds(item: ShadowCaster3D): Aabb {
+		if (item.kind === "mesh") {
+			return transformAabb(
+				this.meshAabb(item.mesh),
+				this.meshModelMatrix(item.opts),
+			);
+		}
+		return transformAabb(
+			{ min: [-0.5, -0.5, 0], max: [0.5, 0.5, 0] },
+			this.quadModelMatrix(item.opts),
+		);
+	}
+
+	/**
+	 * Renders the shadow map for `light` (a directional or spot light with
+	 * `castShadow`) from `casters`, fitting its frustum around them and deep
+	 * enough for `receivers`. Pass the result to `beginPass` as `world.shadow`.
+	 */
+	renderShadowMap(
+		encoder: GPUCommandEncoder,
+		light: Light3DOptions,
+		lightIndex: number,
+		casters: ShadowCaster3D[],
+		receivers: Aabb[],
+		options: ShadowMapOptions3D = {},
+	): ShadowUniformInfo | null {
+		const kind = light.lightType ?? light.type;
+		if (kind !== "directional" && kind !== "spot") return null;
+		const processed = Light3D.processLight(light);
+		const position: Vec3 = [
+			processed.posType[0],
+			processed.posType[1],
+			processed.posType[2],
+		];
+		const direction: Vec3 = [
+			processed.dirRadius[0],
+			processed.dirRadius[1],
+			processed.dirRadius[2],
+		];
+		const mapSize = options.mapSize ?? 2048;
+		const casterBounds = casters.map((c) => this.worldBounds(c));
+		const frustum = fitShadowFrustum(
+			{ type: kind, position, direction, angle: light.angle },
+			casterBounds,
+			receivers,
+			mapSize,
+		);
+		if (!frustum) return null;
+
+		if (!this.shadowTexture || this.shadowTexture.width !== mapSize) {
+			this.shadowTexture?.destroy();
+			this.shadowTexture = this.device.createTexture({
+				label: "ShadowMap",
+				size: { width: mapSize, height: mapSize },
+				format: SHADOW_DEPTH_FORMAT,
+				usage:
+					GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+			});
+		}
+
+		// The light's "camera": only viewProj matters to the vertex shaders.
+		const lightCam = new Float32Array(80);
+		lightCam.set(frustum.viewProj, 32);
+		lightCam.set(frustum.viewProj, 0);
+		lightCam[5] = 1;
+		lightCam.set(frustum.viewProj, 16);
+		lightCam[64] = position[0];
+		lightCam[65] = position[1];
+		lightCam[66] = position[2];
+		lightCam[68] = direction[0];
+		lightCam[69] = direction[1];
+		lightCam[70] = direction[2];
+		lightCam[76] = mapSize;
+		lightCam[77] = mapSize;
+		const lightCamBindGroup = this.createCameraBindGroup(
+			this.cameraPool.getBuffer(this.device, lightCam),
+		);
+
+		const pass = encoder.beginRenderPass({
+			label: "ShadowMapPass",
+			colorAttachments: [],
+			depthStencilAttachment: {
+				view: this.shadowTexture.createView(),
+				depthClearValue: 1.0,
+				depthLoadOp: "clear",
+				depthStoreOp: "store",
+			},
+		});
+		const sampler = this.samplerCache.getSampler(this.device);
+		for (const c of casters) {
+			if (c.kind === "mesh") {
+				const m = this.meshModelMatrix(c.opts);
+				this.mesh3dPipeline.drawShadow(
+					pass,
+					lightCamBindGroup,
+					c.buffers ?? this.getOrCreateMeshBuffers(c.mesh),
+					{
+						modelMatrix: m,
+						normalMatrix: c.opts.normalMatrix ?? Light3D.computeNormalMatrix(m),
+						isSkinned: c.opts.isSkinned,
+						skinningMatrices: c.opts.skinningMatrices,
+					},
+				);
+			} else {
+				const m = this.quadModelMatrix(c.opts);
+				this.quad3dPipeline.drawShadow(
+					pass,
+					lightCamBindGroup,
+					c.texture,
+					sampler,
+					{
+						modelMatrix: m,
+						normalMatrix: m,
+						width: c.opts.width,
+						height: c.opts.height,
+						textureExtent: c.opts.textureExtent,
+						opacity: c.opts.opacity,
+						colorTint: c.opts.colorTint,
+					},
+				);
+			}
+		}
+		pass.end();
+
+		return {
+			matrix: frustum.viewProj,
+			lightIndex,
+			mapSize,
+			softness: options.softness ?? light.shadowSoftness ?? 2.5,
+			bias: kind === "directional" ? 0.0006 : 0.00008,
+			normalOffset: frustum.texelWorldSize * 1.5,
+			darkness: options.darkness ?? light.shadowDarkness ?? 1,
+		};
 	}
 
 	beginPass(
@@ -442,6 +738,9 @@ export class Renderer3D {
 		clearColor: GPUColor = { r: 0, g: 0, b: 0, a: 0 },
 		linearDepthTargetView?: GPUTextureView,
 		lights?: Light3DOptions[],
+		world?: Scene3DWorld,
+		/** Also write unclamped scene radiance (`hdrTexture()`), the bloom source. */
+		writeHdr = false,
 	): {
 		pass: GPURenderPassEncoder;
 		cameraBindGroup: GPUBindGroup;
@@ -456,11 +755,10 @@ export class Renderer3D {
 		);
 		const cameraBindGroup = this.createCameraBindGroup(cameraBuffer);
 
-		const lightsBuffer = this.getOrCreateLightsBuffer(lights);
-		const lightsBindGroup = this.lightsUniformBindGroupCache.getBindGroup(
-			this.device,
-			this.quad3dPipeline.lightsLayout,
+		const lightsBuffer = this.getOrCreateLightsBuffer(lights, world);
+		const lightsBindGroup = this.createLightsBindGroup(
 			lightsBuffer,
+			Boolean(world?.shadow),
 		);
 
 		const msaa = this.sampleCount > 1;
@@ -522,6 +820,28 @@ export class Renderer3D {
 					linearDepthTargetView,
 					msaa ? this.msaaLinearDepthTexture : null,
 					{ r: camera.far, g: 0, b: 0, a: 1 },
+					"clear",
+				),
+			);
+		}
+
+		this.passWritesHdr = writeHdr;
+		if (writeHdr) {
+			this.hdrTexture = this.getOrCreateHdrTexture(surfaceWidth, surfaceHeight);
+			if (msaa) {
+				this.msaaHdrTexture = this.getOrCreateMsaaTexture(
+					this.msaaHdrTexture,
+					"Renderer3DMsaaHdr",
+					"rgba16float",
+					surfaceWidth,
+					surfaceHeight,
+				);
+			}
+			colorAttachments.push(
+				attach(
+					this.hdrTexture.createView(),
+					msaa ? this.msaaHdrTexture : null,
+					{ r: 0, g: 0, b: 0, a: 0 },
 					"clear",
 				),
 			);
@@ -653,8 +973,12 @@ export class Renderer3D {
 					specularIntensity: opts.specularIntensity ?? 0.5,
 					ambientIntensity: opts.ambientIntensity ?? 1.0,
 					metallic: opts.metallic,
+					emissive: opts.emissive,
+					emissiveIntensity: opts.emissiveIntensity,
+				matte: opts.matte,
 				},
 				useMrt,
+				this.passWritesHdr,
 			);
 		}
 	}
@@ -722,8 +1046,33 @@ export class Renderer3D {
 				specularIntensity,
 				ambientIntensity,
 				metallic,
+				emissive: opts.emissive,
+				emissiveIntensity: opts.emissiveIntensity,
+				matte: opts.matte,
 			},
 			useMrt,
+			this.passWritesHdr,
+		);
+	}
+
+	/** T(pos) * Rz * Ry * Rx * S, or the draw's precomputed model matrix. */
+	private meshModelMatrix(opts: DrawMesh3DOpts): Mat4 {
+		if (opts.modelMatrix) return opts.modelMatrix;
+		const {
+			position = [0, 0, 0],
+			rotation = [0, 0, 0],
+			scale = [1, 1, 1],
+		} = opts;
+		let m = Matrix4Math.translate(position[0], position[1], position[2]);
+		const rxRad = (rotation[0] * Math.PI) / 180;
+		const ryRad = (rotation[1] * Math.PI) / 180;
+		const rzRad = (rotation[2] * Math.PI) / 180;
+		if (rzRad !== 0) m = Matrix4Math.multiply(m, Matrix4Math.rotateZ(rzRad));
+		if (ryRad !== 0) m = Matrix4Math.multiply(m, Matrix4Math.rotateY(ryRad));
+		if (rxRad !== 0) m = Matrix4Math.multiply(m, Matrix4Math.rotateX(rxRad));
+		return Matrix4Math.multiply(
+			m,
+			Matrix4Math.scale(scale[0], scale[1], scale[2]),
 		);
 	}
 
@@ -861,9 +1210,6 @@ export class Renderer3D {
 				: this.getOrCreateMeshBuffers(meshOrBuffers);
 
 		const {
-			position = [0, 0, 0],
-			rotation = [0, 0, 0],
-			scale = [1, 1, 1],
 			opacity = 1.0,
 			colorTint = [1, 1, 1, 1],
 			twoSided = true,
@@ -881,29 +1227,7 @@ export class Renderer3D {
 			metallic,
 		} = opts;
 
-		let m: Mat4;
-		if (opts.modelMatrix) {
-			m = opts.modelMatrix;
-		} else {
-			m = Matrix4Math.identity();
-			m = Matrix4Math.multiply(
-				m,
-				Matrix4Math.translate(position[0], position[1], position[2]),
-			);
-
-			const rxRad = (rotation[0] * Math.PI) / 180;
-			const ryRad = (rotation[1] * Math.PI) / 180;
-			const rzRad = (rotation[2] * Math.PI) / 180;
-
-			if (rzRad !== 0) m = Matrix4Math.multiply(m, Matrix4Math.rotateZ(rzRad));
-			if (ryRad !== 0) m = Matrix4Math.multiply(m, Matrix4Math.rotateY(ryRad));
-			if (rxRad !== 0) m = Matrix4Math.multiply(m, Matrix4Math.rotateX(rxRad));
-
-			m = Matrix4Math.multiply(
-				m,
-				Matrix4Math.scale(scale[0], scale[1], scale[2]),
-			);
-		}
+		const m = this.meshModelMatrix(opts);
 
 		const normalMatrix = opts.normalMatrix ?? Light3D.computeNormalMatrix(m);
 		const address = ADDRESS_MODES[textureWrap];
@@ -936,8 +1260,13 @@ export class Renderer3D {
 				specularIntensity,
 				ambientIntensity,
 				metallic,
+				emissive: opts.emissive,
+				emissiveIntensity: opts.emissiveIntensity,
+				matte: opts.matte,
+				maps: opts.maps,
 			},
 			useMrt,
+			this.passWritesHdr,
 		);
 	}
 
@@ -980,10 +1309,60 @@ export class Renderer3D {
 		return pending;
 	}
 
-	private async uploadMaterialTexture(
+	/**
+	 * The material's normal, metallic-roughness, occlusion and emissive maps
+	 * on the GPU (each decoded once); absent maps are left out.
+	 */
+	materialMaps(material: Material3D): Promise<MeshMaterialMaps> {
+		let pending = this.materialMapCache.get(material);
+		if (!pending) {
+			pending = (async () => {
+				const label = material.name;
+				const [normal, metallicRoughness, occlusion, emissive] =
+					await Promise.all([
+						this.uploadImage(material.normalTextureBuffer, `${label}:normal`),
+						this.uploadImage(
+							material.metallicRoughnessTextureBuffer,
+							`${label}:metallicRoughness`,
+						),
+						this.uploadImage(
+							material.occlusionTextureBuffer,
+							`${label}:occlusion`,
+						),
+						this.uploadImage(
+							material.emissiveTextureBuffer,
+							`${label}:emissive`,
+						),
+					]);
+				return {
+					...(normal && { normal, normalScale: material.normalScale ?? 1 }),
+					...(metallicRoughness && { metallicRoughness }),
+					...(occlusion && {
+						occlusion,
+						occlusionStrength: material.occlusionStrength ?? 1,
+					}),
+					...(emissive && { emissive }),
+				};
+			})();
+			this.materialMapCache.set(material, pending);
+		}
+		return pending;
+	}
+
+	private uploadMaterialTexture(
 		material: Material3D,
 	): Promise<GPUTexture | undefined> {
-		const encoded = material.diffuseTextureBuffer;
+		return this.uploadImage(
+			material.diffuseTextureBuffer,
+			`Material:${material.name}`,
+		);
+	}
+
+	/** Decodes an encoded image into a texture with a full mip chain. */
+	private async uploadImage(
+		encoded: Uint8Array | ArrayBuffer | undefined,
+		label: string,
+	): Promise<GPUTexture | undefined> {
 		if (!encoded) return undefined;
 		const sharp = (await import(/* webpackIgnore: true */ "sharp")).default;
 		const source = Buffer.from(
@@ -993,7 +1372,7 @@ export class Renderer3D {
 		if (!width || !height) return undefined;
 		const mipLevelCount = Math.floor(Math.log2(Math.max(width, height))) + 1;
 		const texture = this.device.createTexture({
-			label: `Material:${material.name}`,
+			label,
 			size: { width, height },
 			mipLevelCount,
 			format: "rgba8unorm",
@@ -1015,6 +1394,25 @@ export class Renderer3D {
 			);
 		}
 		return texture;
+	}
+
+	/** Writes `source` with bloom into `dest` (see `BloomOptions`). */
+	applyBloom(
+		encoder: GPUCommandEncoder,
+		source: GPUTexture,
+		dest: GPUTexture,
+		options: BloomOptions = {},
+		/** Scene radiance to threshold (from a `writeHdr` pass); default `source`. */
+		hdrSource?: GPUTexture | null,
+	): void {
+		this.bloomPipeline ??= new BloomPipeline(this.device);
+		this.bloomPipeline.apply(
+			encoder,
+			source,
+			dest,
+			options,
+			hdrSource ?? undefined,
+		);
 	}
 
 	applyDepthOfField(
@@ -1053,17 +1451,21 @@ export class Renderer3D {
 	}
 
 	destroy(): void {
+		this.bloomPipeline?.destroy();
 		this.depthTexture?.destroy();
+		this.shadowTexture?.destroy();
+		this.placeholderShadowTexture?.destroy();
 		this.linearDepthTexture?.destroy();
 		this.msaaColorTexture?.destroy();
 		this.msaaLinearDepthTexture?.destroy();
+		this.msaaHdrTexture?.destroy();
+		this.hdrTexture?.destroy();
 		this.quad3dPipeline.destroy();
 		this.slug3dPipeline.destroy();
 		this.mesh3dPipeline.destroy();
 		this.cameraPool.destroy();
 		this.lightsPool.destroy();
 		this.cameraUniformBindGroupCache.destroy();
-		this.lightsUniformBindGroupCache.destroy();
 	}
 }
 

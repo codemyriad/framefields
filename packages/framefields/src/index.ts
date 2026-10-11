@@ -17,8 +17,11 @@ export {
 
 import {
 	FontManager,
+	type MeasuredGlyph,
+	type MeasureTextOptions,
 	type RegisteredFont,
 	type RegisterFontOptions,
+	type TextMetrics,
 } from "./fonts/index.js";
 import { autoId } from "./ids.js";
 import { normalizeTextSpans, type TextSpan } from "./rich-text.js";
@@ -52,7 +55,14 @@ export {
 	type TextSpanItem,
 	type TextSpanMark,
 } from "./rich-text.js";
-export { FontManager, type RegisteredFont, type RegisterFontOptions };
+export {
+	FontManager,
+	type MeasuredGlyph,
+	type MeasureTextOptions,
+	type RegisteredFont,
+	type RegisterFontOptions,
+	type TextMetrics,
+};
 
 export {
 	CannyComputePipeline,
@@ -122,12 +132,16 @@ import {
 	type CompositorProgramConfig,
 	type CompositorToProgramOptions,
 	compositorToProgram,
+	type EnvironmentPreset,
 	type FlexNode,
 	LayerAnimation,
 	type LayoutNode,
 	type LightNode,
+	lintComposition,
+	type MatteMode,
 	type MediaNode,
 	type Model3DNode,
+	mergeAnimationTracks,
 	type ShapeNode,
 	type TextNode,
 } from "@framefields/compositions/program";
@@ -142,6 +156,7 @@ import {
 	type MediaSourceInput,
 	type MeshAudioDeformConfig,
 	ProgrammaticSignal,
+	type RenderDiagnostic,
 	type Signal,
 	type VirtualMediaData,
 } from "@framefields/core";
@@ -239,6 +254,12 @@ import {
 	type Plane3DOptions,
 	type Prism3DOptions,
 } from "./shapes3d.js";
+import {
+	type SceneSequenceOptions,
+	type SequenceEntry,
+	type SequenceNode,
+	sequence,
+} from "./transitions.js";
 
 export interface SectionOptions {
 	readonly id?: string;
@@ -406,6 +427,8 @@ export {
 	AudioSpectrumTypographySchema,
 	applyStaggerToChildren,
 	type BlockNode,
+	type BloomConfig,
+	BloomConfigSchema,
 	type BoxNode,
 	BoxNodeSchema,
 	buildPathLUT,
@@ -445,6 +468,10 @@ export {
 	type EaseRef,
 	type EnhancedTextNode,
 	EnhancedTextNodeSchema,
+	type EnvironmentFog,
+	EnvironmentFogSchema,
+	type EnvironmentPreset,
+	EnvironmentPresetSchema,
 	type ExpressionEvaluationContext,
 	type ExpressionSelector,
 	ExpressionSelectorSchema,
@@ -473,6 +500,7 @@ export {
 	generatePathSegments,
 	getScramblePool,
 	getShuffledOrder,
+	hoistMattes,
 	type Keyframe,
 	type KeyframeTuple,
 	type KineticMarqueeConfig,
@@ -488,12 +516,16 @@ export {
 	LineSpacingDynamicsSchema,
 	type LongShadowConfig,
 	LongShadowConfigSchema,
+	lintComposition,
 	type MaterialType,
 	MaterialTypeSchema,
+	type MatteMode,
+	MatteModeSchema,
 	type MediaNode,
 	MediaNodeSchema,
 	type Model3DNode,
 	Model3DNodeSchema,
+	mergeAnimationTracks,
 	type ParticleDissolveConfig,
 	ParticleDissolveConfigSchema,
 	type PathChainLUT,
@@ -557,6 +589,8 @@ export {
 	TextSpanSchema,
 	type TextWigglySelector,
 	TextWigglySelectorSchema,
+	type ToneMapping,
+	ToneMappingSchema,
 	type TrackSource,
 	type TypewriterAnimator,
 	TypewriterAnimatorSchema,
@@ -746,6 +780,11 @@ export {
 	type VisionProps,
 } from "./effects/index.js";
 export {
+	Lighting,
+	type LightingRig,
+	type LightingRigOptions,
+} from "./lighting.js";
+export {
 	type Carousel3DOptions,
 	type Cube3DOptions,
 	type CubeFaceConfig,
@@ -760,8 +799,17 @@ export {
 	type RoundedBox3DOptions,
 	type Shape3DContainer,
 	type Sphere3DOptions,
+	type Surface3DOptions,
 	type Text3DOptions,
 } from "./shapes3d.js";
+export {
+	type SceneSequenceOptions,
+	type SequenceEntry,
+	type SequenceNode,
+	Transition,
+	type TransitionDirection,
+	type TransitionSpec,
+} from "./transitions.js";
 
 export interface CompositionOptions {
 	width: number;
@@ -1776,7 +1824,38 @@ export class Composition {
 				: outputPathOrOptions;
 		const renderer = opts.renderer ?? new HeadlessMediaRenderer();
 		const result = await renderer.renderVideo(this.toVirtualMedia(), opts);
+		if (result.qa) {
+			// Fold the document checks into the output checks.
+			const lint = this.lint();
+			const issues = [
+				...result.qa.issues,
+				...lint.map((d) => ({
+					severity: d.severity,
+					code: d.code,
+					message: d.message,
+					...(d.layerId !== undefined && { layerId: d.layerId }),
+				})),
+			];
+			result.qa = {
+				...result.qa,
+				issues,
+				// Lint warnings advise; only a lint error fails the render.
+				passed:
+					result.qa.passed && !lint.some((d) => d.severity === "error"),
+			};
+		}
 		return deliverToOutputPath(result, opts.outputPath);
+	}
+
+	/**
+	 * Checks the document for things that render without error but not as
+	 * intended: unreadable colors or gradients (drawn transparent),
+	 * low-contrast text, layers parked off-canvas, shadows on lights that
+	 * cannot cast them, physical materials without an environment, tracks that
+	 * never change. `renderVideo({ qa })` includes these automatically.
+	 */
+	public lint(): RenderDiagnostic[] {
+		return lintComposition(this.toSpec());
 	}
 }
 
@@ -1785,7 +1864,6 @@ export class Composition {
  */
 
 export type AnimatableNode<T extends LayoutNode> = T & {
-	mask?: unknown;
 	glass?: Record<string, unknown>;
 	audioDeform?: MeshAudioDeformConfig | Record<string, unknown>;
 	crop?: CropProps | Crop;
@@ -1827,7 +1905,16 @@ export type AnimatableNode<T extends LayoutNode> = T & {
 			  },
 		options?: PinToObjectOptions,
 	): AnimatableNode<T>;
-	withMask(mask: unknown): AnimatableNode<T>;
+	/**
+	 * Track matte: `matte` (any layer) masks this one by its alpha or
+	 * brightness. It is laid out like a sibling (same parent) and timed with
+	 * this node; with no x/y/width/height it covers this node's box. Animate
+	 * the matte for wipes and reveals: text through a sliding box, video
+	 * inside type, an iris circle.
+	 */
+	withMatte(matte: LayoutNode, mode?: MatteMode): AnimatableNode<T>;
+	/** Alias of {@link withMatte}. */
+	withMask(mask: LayoutNode, mode?: MatteMode): AnimatableNode<T>;
 	withPbrGlass(options?: Record<string, unknown>): AnimatableNode<T>;
 	deformWithAudio(
 		config?: MeshAudioDeformConfig | Record<string, unknown>,
@@ -1861,24 +1948,21 @@ function withAnimation<T extends LayoutNode>(node: T): AnimatableNode<T> {
 				| LayerAnimation[]
 			)[]
 		) => {
-			const flatAnims = anims.flat();
-			if (
-				flatAnims.length > 1 ||
-				(flatAnims.length === 1 && Array.isArray(anims[0]))
-			) {
-				const allTracks = flatAnims.flatMap((a) =>
+			// Every call layers onto what is already there: keyframe tracks on
+			// the same prop merge (a later key wins on a shared frame).
+			const incoming = anims
+				.flat()
+				.flatMap((a) =>
 					a instanceof LayerAnimation
 						? a.tracks
 						: ((a as { tracks?: AnimationTrack[] }).tracks ?? []),
 				);
-				target.animation = { tracks: allTracks };
-			} else if (flatAnims.length === 1) {
-				const anim = flatAnims[0];
-				target.animation =
-					anim instanceof LayerAnimation
-						? anim.toSpec()
-						: (anim as { tracks: AnimationTrack[] });
-			}
+			const existing =
+				(target.animation as { tracks?: AnimationTrack[] } | undefined)
+					?.tracks ?? [];
+			target.animation = {
+				tracks: mergeAnimationTracks([...existing, ...incoming]),
+			};
 			return target;
 		},
 		enumerable: false,
@@ -1944,15 +2028,18 @@ function withAnimation<T extends LayoutNode>(node: T): AnimatableNode<T> {
 		configurable: true,
 	});
 
-	Object.defineProperty(target, "withMask", {
-		value: (mask: unknown) => {
-			target.mask = mask;
-			return target;
-		},
-		enumerable: false,
-		writable: true,
-		configurable: true,
-	});
+	const withMatte = (matte: LayoutNode, mode?: MatteMode) => {
+		target.matte = { node: matte, ...(mode && { mode }) };
+		return target;
+	};
+	for (const name of ["withMatte", "withMask"]) {
+		Object.defineProperty(target, name, {
+			value: withMatte,
+			enumerable: false,
+			writable: true,
+			configurable: true,
+		});
+	}
 
 	Object.defineProperty(target, "withPbrGlass", {
 		value: (options?: Record<string, unknown>) => {
@@ -2265,14 +2352,19 @@ export const Layer = {
 			| "star"
 			| "arrow"
 			| "path" = "rect",
-		options: Partial<ShapeNode> = {},
+		options: Partial<ShapeNode> & {
+			/** Alias of `fillColor`: a color or a CSS gradient string. */
+			fill?: string;
+		} = {},
 	): AnimatableNode<ShapeNode> =>
 		withAnimation({
 			id: options.id ?? autoId("shape"),
 			kind: "shape",
 			shapeType: options.shapeType ?? shapeType,
-			fillColor: options.fillColor ?? "#3b82f6",
 			...options,
+			// `fill` and `fillColor` are the same thing; either may hold a
+			// color or a CSS gradient.
+			fillColor: options.fillColor ?? options.fill ?? "#3b82f6",
 		}),
 	flex: (options: Partial<FlexNode> = {}): AnimatableNode<FlexNode> =>
 		withAnimation({
@@ -2540,6 +2632,21 @@ export const Layer = {
 		intensity: number = 0.5,
 		options: Partial<LightNode> = {},
 	): AnimatableNode<LightNode> => Light.ambient(color, intensity, options),
+	/**
+	 * Scenes back to back with transitions between them; see `Transition`.
+	 * `comp.add(Layer.sequence([{ scene: hero(), duration: 90 },
+	 *   { scene: next(), duration: 120, transition: Transition.push("left") }]))`.
+	 * The result's `totalFrames` is the sequence length.
+	 */
+	sequence: (
+		entries: SequenceEntry[],
+		options?: SceneSequenceOptions,
+	): SequenceNode => sequence(entries, options),
+	/** See {@link Light.environment}: `Layer.environment("studio", { exposure: 0.3 })`. */
+	environment: (
+		presetOrOptions: EnvironmentPreset | EnvironmentOptions = "studio",
+		options: EnvironmentOptions = {},
+	): AnimatableNode<LightNode> => Light.environment(presetOrOptions, options),
 	directionalLight: (
 		options: Partial<LightNode> = {},
 	): AnimatableNode<LightNode> => Light.directional(options),
@@ -2654,7 +2761,51 @@ export const Layer = {
 		}),
 };
 
+/** World settings for `Layer.environment` (see `LightNode` for every field). */
+export type EnvironmentOptions = Partial<
+	Pick<
+		LightNode,
+		| "id"
+		| "preset"
+		| "top"
+		| "horizon"
+		| "bottom"
+		| "intensity"
+		| "softboxes"
+		| "rotation"
+		| "exposure"
+		| "toneMapping"
+		| "fog"
+		| "bloom"
+		| "startFrame"
+		| "durationFrames"
+	>
+>;
+
 export const Light = {
+	/**
+	 * The scene's world: a procedural studio environment that lights and
+	 * reflects off every surface, plus exposure, tone mapping and fog. Adding
+	 * one switches the scene to physically based shading (GGX, real
+	 * `roughness` / `metallic`, `emissive` that blooms past white).
+	 */
+	environment: (
+		presetOrOptions: EnvironmentPreset | EnvironmentOptions = "studio",
+		options: EnvironmentOptions = {},
+	): AnimatableNode<LightNode> => {
+		const opts =
+			typeof presetOrOptions === "string"
+				? { preset: presetOrOptions, ...options }
+				: { ...presetOrOptions, ...options };
+		return withAnimation({
+			kind: "light",
+			lightType: "environment",
+			preset: "studio",
+			intensity: 1,
+			...opts,
+			id: opts.id ?? autoId("environment"),
+		});
+	},
 	ambient: (
 		color: string = "#ffffff",
 		intensity: number = 0.5,

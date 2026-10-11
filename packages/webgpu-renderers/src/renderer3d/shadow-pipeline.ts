@@ -13,6 +13,11 @@ export interface ShadowMapOptions {
 	slopeBias?: number;
 }
 
+/**
+ * @deprecated A texture holder only; nothing renders into it. Shadows are
+ * drawn by `Renderer3D.renderShadowMap` (a `castShadow` directional or spot
+ * light in the scene).
+ */
 export class ShadowPipeline {
 	public shadowDepthTexture: GPUTexture;
 	public shadowDepthView: GPUTextureView;
@@ -26,7 +31,8 @@ export class ShadowPipeline {
 			label: "shadow-depth-map",
 			size: [resolution, resolution, 1],
 			format: "depth32float",
-			usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+			usage:
+				GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
 		});
 
 		this.shadowDepthView = this.shadowDepthTexture.createView({
@@ -50,7 +56,14 @@ export class ShadowPipeline {
 	): Mat4 {
 		const viewMatrix = Matrix4Math.lookAt(lightPos, targetPos, [0, 1, 0]);
 		const half = orthoSize * 0.5;
-		const projMatrix = Matrix4Math.orthographic(-half, half, -half, half, near, far);
+		const projMatrix = Matrix4Math.orthographic(
+			-half,
+			half,
+			-half,
+			half,
+			near,
+			far,
+		);
 		this.lightViewProjMatrix = Matrix4Math.multiply(projMatrix, viewMatrix);
 		return this.lightViewProjMatrix;
 	}

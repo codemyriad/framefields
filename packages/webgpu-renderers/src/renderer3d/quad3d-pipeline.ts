@@ -1,7 +1,45 @@
 import { BufferPool } from "../renderer2d/buffer-pool.js";
 import { quad3dWgsl } from "../shaders/quad3d.js";
+import { fullCoverageView, matteLayoutEntry } from "./matte3d.js";
+import { BloomPipelineVariants } from "./pipeline-variants.js";
+import { SHADOW_DEPTH_STENCIL } from "./shadow-depth.js";
+import {
+	packSurfaceParams,
+	SURFACE_PARAMS_FLOATS,
+	type SurfaceParams,
+} from "./surface-params.js";
 
-export interface ModelUniformData {
+/**
+ * Group 3 of every lit 3D shader: the lights uniform, then the shadow map and
+ * its comparison sampler (a 1×1 cleared map when no light casts shadows).
+ */
+export function createLightsLayout(
+	device: GPUDevice,
+	label = "Lights3DLayout",
+): GPUBindGroupLayout {
+	return device.createBindGroupLayout({
+		label,
+		entries: [
+			{
+				binding: 0,
+				visibility: GPUShaderStage.FRAGMENT,
+				buffer: { type: "uniform" },
+			},
+			{
+				binding: 1,
+				visibility: GPUShaderStage.FRAGMENT,
+				texture: { sampleType: "depth" },
+			},
+			{
+				binding: 2,
+				visibility: GPUShaderStage.FRAGMENT,
+				sampler: { type: "comparison" },
+			},
+		],
+	});
+}
+
+export interface ModelUniformData extends SurfaceParams {
 	modelMatrix: Float32Array | number[];
 	normalMatrix?: Float32Array | number[];
 	colorTint?: [number, number, number, number];
@@ -15,6 +53,8 @@ export interface ModelUniformData {
 	/** Fraction of the texture the layer covers, [u, v] (default the whole texture) */
 	textureExtent?: [number, number];
 	material?: "lit" | "unlit";
+	/** Screen-space track matte: the layer shows where this texture's alpha does. */
+	matte?: GPUTexture;
 	shininess?: number;
 	roughness?: number;
 	specularIntensity?: number;
@@ -30,6 +70,8 @@ export type MaterialUniformData = Pick<
 	| "specularIntensity"
 	| "ambientIntensity"
 	| "metallic"
+	| "emissive"
+	| "emissiveIntensity"
 >;
 
 /** [shininess, specularIntensity, ambientIntensity, materialMode] as the 3D shaders' lighting reads them. */
@@ -53,6 +95,9 @@ export class Quad3DPipeline {
 	private device: GPUDevice;
 	public pipelineSingle: GPURenderPipeline;
 	public pipelineMrt: GPURenderPipeline;
+	private bloomVariants: BloomPipelineVariants;
+	/** Depth-only, alpha-tested: draws a caster into a shadow map. */
+	public pipelineShadow: GPURenderPipeline;
 	public cameraLayout: GPUBindGroupLayout;
 	public modelLayout: GPUBindGroupLayout;
 	public textureLayout: GPUBindGroupLayout;
@@ -60,8 +105,8 @@ export class Quad3DPipeline {
 	private modelPool: BufferPool;
 	private vertexBuffer: GPUBuffer;
 	private indexBuffer: GPUBuffer;
-	// 16 (model) + 16 (normal) + 4 (tint) + 4 (borderColor) + 4 (params) + 4 (dimensions) + 4 (materialParams) = 52 floats (208 bytes)
-	private modelData = new Float32Array(52);
+	// 16 (model) + 16 (normal) + 4 (tint) + 4 (borderColor) + 4 (params) + 4 (dimensions) + 4 (materialParams) + 8 (pbr, emissive) = 60 floats (240 bytes)
+	private modelData = new Float32Array(52 + SURFACE_PARAMS_FLOATS);
 
 	constructor(
 		device: GPUDevice,
@@ -72,7 +117,7 @@ export class Quad3DPipeline {
 	) {
 		this.device = device;
 		this.modelPool = new BufferPool(
-			208,
+			(52 + SURFACE_PARAMS_FLOATS) * 4,
 			GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
 		);
 
@@ -100,6 +145,7 @@ export class Quad3DPipeline {
 					visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
 					buffer: { type: "uniform" },
 				},
+				matteLayoutEntry(1),
 			],
 		});
 
@@ -119,16 +165,7 @@ export class Quad3DPipeline {
 			],
 		});
 
-		this.lightsLayout = device.createBindGroupLayout({
-			label: "Quad3DLightsLayout",
-			entries: [
-				{
-					binding: 0,
-					visibility: GPUShaderStage.FRAGMENT,
-					buffer: { type: "uniform" },
-				},
-			],
-		});
+		this.lightsLayout = createLightsLayout(device, "Quad3DLightsLayout");
 
 		const pipelineLayout = device.createPipelineLayout({
 			bindGroupLayouts: [
@@ -234,6 +271,36 @@ export class Quad3DPipeline {
 		});
 
 		// Unit quad centered at origin: [-0.5, -0.5] to [0.5, 0.5] with normal [0, 0, -1]
+		this.bloomVariants = new BloomPipelineVariants(device, {
+			label: "Quad3DPipeline",
+			layout: pipelineLayout,
+			vertex: vertexState,
+			module,
+			format,
+			depthStencil: {
+				format: depthFormat,
+				depthWriteEnabled: true,
+				depthCompare: "less-equal",
+			},
+			primitive: { topology: "triangle-list", cullMode: "none" },
+			multisample: { count: sampleCount },
+		});
+
+		this.pipelineShadow = device.createRenderPipeline({
+			label: "Quad3DPipelineShadow",
+			layout: device.createPipelineLayout({
+				bindGroupLayouts: [
+					this.cameraLayout,
+					this.modelLayout,
+					this.textureLayout,
+				],
+			}),
+			vertex: vertexState,
+			fragment: { module, entryPoint: "fs_shadow", targets: [] },
+			depthStencil: SHADOW_DEPTH_STENCIL,
+			primitive: { topology: "triangle-list", cullMode: "none" },
+		});
+
 		const vertices = new Float32Array([
 			-0.5, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.5, -0.5, 0.0, 1.0, 0.0, 0.0,
 			0.0, -1.0, 0.5, 0.5, 0.0, 1.0, 1.0, 0.0, 0.0, -1.0, -0.5, 0.5, 0.0, 0.0,
@@ -262,15 +329,7 @@ export class Quad3DPipeline {
 		this.modelPool.reset();
 	}
 
-	draw(
-		pass: GPURenderPassEncoder,
-		cameraBindGroup: GPUBindGroup,
-		lightsBindGroup: GPUBindGroup,
-		texture: GPUTexture,
-		sampler: GPUSampler,
-		data: ModelUniformData,
-		useMrt = false,
-	): void {
+	private packModel(data: ModelUniformData): GPUBindGroup {
 		const mat = data.modelMatrix;
 		for (let i = 0; i < 16; i++) {
 			this.modelData[i] = mat[i] ?? 0;
@@ -304,27 +363,75 @@ export class Quad3DPipeline {
 		this.modelData[47] = data.textureExtent?.[1] ?? 0;
 
 		this.modelData.set(packMaterialParams(data), 48);
+		packSurfaceParams(data, this.modelData, 52);
 
 		const modelBuffer = this.modelPool.getBuffer(this.device, this.modelData);
-
-		const modelBindGroup = this.device.createBindGroup({
+		return this.device.createBindGroup({
 			layout: this.modelLayout,
-			entries: [{ binding: 0, resource: { buffer: modelBuffer } }],
+			entries: [
+				{ binding: 0, resource: { buffer: modelBuffer } },
+				{
+					binding: 1,
+					resource: data.matte?.createView() ?? fullCoverageView(this.device),
+				},
+			],
 		});
+	}
 
-		const textureBindGroup = this.device.createBindGroup({
+	private textureBindGroup(
+		texture: GPUTexture,
+		sampler: GPUSampler,
+	): GPUBindGroup {
+		return this.device.createBindGroup({
 			layout: this.textureLayout,
 			entries: [
 				{ binding: 0, resource: sampler },
 				{ binding: 1, resource: texture.createView() },
 			],
 		});
+	}
 
-		pass.setPipeline(useMrt ? this.pipelineMrt : this.pipelineSingle);
+	draw(
+		pass: GPURenderPassEncoder,
+		cameraBindGroup: GPUBindGroup,
+		lightsBindGroup: GPUBindGroup,
+		texture: GPUTexture,
+		sampler: GPUSampler,
+		data: ModelUniformData,
+		useMrt = false,
+		useBloom = false,
+	): void {
+		const modelBindGroup = this.packModel(data);
+		const textureBindGroup = this.textureBindGroup(texture, sampler);
+
+		pass.setPipeline(
+			useBloom
+				? this.bloomVariants.get(useMrt)
+				: useMrt
+					? this.pipelineMrt
+					: this.pipelineSingle,
+		);
 		pass.setBindGroup(0, cameraBindGroup);
 		pass.setBindGroup(1, modelBindGroup);
 		pass.setBindGroup(2, textureBindGroup);
 		pass.setBindGroup(3, lightsBindGroup);
+		pass.setVertexBuffer(0, this.vertexBuffer);
+		pass.setIndexBuffer(this.indexBuffer, "uint16");
+		pass.drawIndexed(6);
+	}
+
+	/** Draws the quad into a shadow map (`lightCameraBindGroup` holds the light's view-projection). */
+	drawShadow(
+		pass: GPURenderPassEncoder,
+		lightCameraBindGroup: GPUBindGroup,
+		texture: GPUTexture,
+		sampler: GPUSampler,
+		data: ModelUniformData,
+	): void {
+		pass.setPipeline(this.pipelineShadow);
+		pass.setBindGroup(0, lightCameraBindGroup);
+		pass.setBindGroup(1, this.packModel(data));
+		pass.setBindGroup(2, this.textureBindGroup(texture, sampler));
 		pass.setVertexBuffer(0, this.vertexBuffer);
 		pass.setIndexBuffer(this.indexBuffer, "uint16");
 		pass.drawIndexed(6);

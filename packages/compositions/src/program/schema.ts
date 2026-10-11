@@ -156,8 +156,20 @@ export const AnimatablePropSchema = z.enum([
 	"wireframe",
 	"scaleX",
 	"scaleY",
+	// Physically based surfaces & world
+	"emissive",
+	"emissiveIntensity",
+	"exposure",
 ]);
 export type AnimatableProp = z.infer<typeof AnimatablePropSchema>;
+
+export const MatteModeSchema = z.enum([
+	"alpha",
+	"alpha-inverted",
+	"luma",
+	"luma-inverted",
+]);
+export type MatteMode = z.infer<typeof MatteModeSchema>;
 
 export const MaterialTypeSchema = z.enum([
 	"lit",
@@ -566,6 +578,28 @@ const BaseNodeFields = {
 	fresnelPower: z.number().min(1.0).max(10.0).optional(),
 	/** Environment reflection intensity [0, 10]. */
 	envIntensity: z.number().min(0).max(10.0).optional(),
+	/** Light the surface gives off (3D layers): a CSS color added on top of lighting. */
+	emissive: ColorSchema.optional(),
+	/** Emissive multiplier; above 1 glows past white (feeds bloom). Default 1. */
+	emissiveIntensity: z.number().min(0).optional(),
+	/** Falls into a `castShadow` light's shadow map. Meshes default on, flat layers off. */
+	castShadow: z.boolean().optional(),
+	/**
+	 * Track matte: another layer whose alpha or brightness masks this one.
+	 * Laid out like a sibling (same parent), timed with this node; with no
+	 * x/y/width/height of its own it covers this node's box.
+	 */
+	matte: z
+		.object({
+			node: z.custom<unknown>((v) => typeof v === "object" && v !== null),
+			mode: MatteModeSchema.optional(),
+		})
+		.optional(),
+	/** Set by the compiler: the id of this node's hoisted matte layer. */
+	matteId: z.string().optional(),
+	/** Set by the compiler: this layer is the matte of node `matteOf` (not drawn by itself). */
+	matteOf: z.string().optional(),
+	matteMode: MatteModeSchema.optional(),
 	/** Per-node motion: tracks keyed by node id. */
 	animation: LayerAnimationSchema.default({ tracks: [] }),
 	/** Vision configuration or effect attached directly to the node. */
@@ -618,6 +652,13 @@ export interface CompositionNodeBase {
 	transmission?: number;
 	dispersion?: number;
 	fresnelPower?: number;
+	emissive?: string;
+	emissiveIntensity?: number;
+	castShadow?: boolean;
+	matte?: { node: unknown; mode?: MatteMode };
+	matteId?: string;
+	matteOf?: string;
+	matteMode?: MatteMode;
 	envIntensity?: number;
 	startFrame?: number;
 	durationFrames?: number;
@@ -1026,13 +1067,56 @@ export const CameraNodeSchema: z.ZodType<CameraNode> = z
 	})
 	.strict() as unknown as z.ZodType<CameraNode>;
 
-export type LightType = "ambient" | "directional" | "point" | "spot";
+export type LightType =
+	| "ambient"
+	| "directional"
+	| "point"
+	| "spot"
+	| "environment";
 export const LightTypeSchema = z.enum([
 	"ambient",
 	"directional",
 	"point",
 	"spot",
+	/** Scene world: image-based light, tone mapping, exposure, fog. Turns on physical shading. */
+	"environment",
 ]);
+
+export const EnvironmentPresetSchema = z.enum([
+	"studio",
+	"soft",
+	"sunset",
+	"night",
+	"neutral",
+]);
+export type EnvironmentPreset = z.infer<typeof EnvironmentPresetSchema>;
+
+export const ToneMappingSchema = z.enum(["neutral", "agx", "aces", "none"]);
+export type ToneMapping = z.infer<typeof ToneMappingSchema>;
+
+export const EnvironmentFogSchema = z
+	.object({
+		color: ColorSchema,
+		start: z.number().min(0),
+		end: z.number().min(0),
+		opacity: z.number().min(0).max(1).optional(),
+	})
+	.strict();
+export type EnvironmentFog = z.infer<typeof EnvironmentFogSchema>;
+
+export const BloomConfigSchema = z
+	.object({
+		/** Glow strength. Default 0.2. */
+		intensity: z.number().min(0).max(10).optional(),
+		/** Scene radiance where glow starts (1 = white). Default 2.5. */
+		threshold: z.number().min(0).max(16).optional(),
+		/** Soft transition below the threshold. Default 0.4. */
+		knee: z.number().min(0).max(1).optional(),
+		/** Spread in mip levels (1..8). Default 6. */
+		radius: z.number().min(1).max(8).optional(),
+	})
+	.strict();
+export type BloomConfig = z.infer<typeof BloomConfigSchema>;
 
 export interface LightNode {
 	id: string;
@@ -1051,6 +1135,26 @@ export interface LightNode {
 	decay?: number;
 	angle?: number;
 	penumbra?: number;
+	/** Directional / spot: render a shadow map (one shadow light per scene). */
+	castShadow?: boolean;
+	/** Shadow edge blur in shadow-map texels. Default 2.5. */
+	shadowSoftness?: number;
+	/** 0..1, how dark shadows get. Default 1. */
+	shadowDarkness?: number;
+	/** Shadow map resolution (texels per side). Default 2048. */
+	shadowMapSize?: number;
+	// environment
+	preset?: EnvironmentPreset;
+	top?: string;
+	horizon?: string;
+	bottom?: string;
+	softboxes?: number;
+	rotation?: number;
+	exposure?: number;
+	toneMapping?: ToneMapping;
+	fog?: EnvironmentFog;
+	/** Glow around emissive surfaces and hot highlights: `true` or settings. */
+	bloom?: boolean | BloomConfig;
 	startFrame?: number;
 	durationFrames?: number;
 	animation?: LayerAnimationSpec;
@@ -1074,6 +1178,20 @@ export const LightNodeSchema: z.ZodType<LightNode> = z
 		decay: z.number().min(0).default(2.0),
 		angle: z.number().min(0).max(180).default(45),
 		penumbra: z.number().min(0).max(1).default(0.2),
+		castShadow: z.boolean().optional(),
+		shadowSoftness: z.number().min(0).max(64).optional(),
+		shadowDarkness: z.number().min(0).max(1).optional(),
+		shadowMapSize: z.number().int().min(256).max(8192).optional(),
+		preset: EnvironmentPresetSchema.optional(),
+		top: ColorSchema.optional(),
+		horizon: ColorSchema.optional(),
+		bottom: ColorSchema.optional(),
+		softboxes: z.number().min(0).optional(),
+		rotation: z.number().optional(),
+		exposure: z.number().min(-16).max(16).optional(),
+		toneMapping: ToneMappingSchema.optional(),
+		fog: EnvironmentFogSchema.optional(),
+		bloom: z.union([z.boolean(), BloomConfigSchema]).optional(),
 		startFrame: z.number().int().min(0).default(0),
 		durationFrames: z.number().int().min(1).optional(),
 		animation: LayerAnimationSchema.default({ tracks: [] }),

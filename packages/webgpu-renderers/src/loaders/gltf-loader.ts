@@ -111,13 +111,18 @@ interface GltfMaterial {
 		metallicFactor?: number;
 		roughnessFactor?: number;
 		baseColorTexture?: { index: number; texCoord?: number };
+		metallicRoughnessTexture?: { index: number; texCoord?: number };
 	};
+	normalTexture?: { index: number; texCoord?: number; scale?: number };
+	occlusionTexture?: { index: number; texCoord?: number; strength?: number };
+	emissiveTexture?: { index: number; texCoord?: number };
 	emissiveFactor?: [number, number, number];
 	doubleSided?: boolean;
 	alphaMode?: "OPAQUE" | "MASK" | "BLEND";
 	alphaCutoff?: number;
 	extensions?: {
 		KHR_materials_unlit?: Record<string, never>;
+		KHR_materials_emissive_strength?: { emissiveStrength?: number };
 		/** VRM 1.0 toon material: the base is lit flat, the shadowed side tinted by shadeColorFactor. */
 		VRMC_materials_mtoon?: { shadeColorFactor?: [number, number, number] };
 	};
@@ -204,7 +209,8 @@ export class GltfLoader {
 	 * Checks if the given buffer starts with the GLB binary container magic bytes.
 	 */
 	public static isGlb(buffer: Uint8Array | ArrayBuffer): boolean {
-		const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+		const bytes =
+			buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
 		if (bytes.length < 12) return false;
 		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 		return view.getUint32(0, true) === GLB_MAGIC;
@@ -253,13 +259,23 @@ export class GltfLoader {
 						if (base64Index !== -1) {
 							const b64 = buf.uri.substring(base64Index + 7);
 							const rawBuf = Buffer.from(b64, "base64");
-							binaryBuffers[i] = new Uint8Array(rawBuf.buffer, rawBuf.byteOffset, rawBuf.byteLength);
+							binaryBuffers[i] = new Uint8Array(
+								rawBuf.buffer,
+								rawBuf.byteOffset,
+								rawBuf.byteLength,
+							);
 						}
 					} else if (basePath) {
-						const resolved = path.isAbsolute(buf.uri) ? buf.uri : path.join(basePath, buf.uri);
+						const resolved = path.isAbsolute(buf.uri)
+							? buf.uri
+							: path.join(basePath, buf.uri);
 						if (fs.existsSync(resolved)) {
 							const fileBuf = fs.readFileSync(resolved);
-							binaryBuffers[i] = new Uint8Array(fileBuf.buffer, fileBuf.byteOffset, fileBuf.byteLength);
+							binaryBuffers[i] = new Uint8Array(
+								fileBuf.buffer,
+								fileBuf.byteOffset,
+								fileBuf.byteLength,
+							);
 						}
 					}
 				}
@@ -269,7 +285,10 @@ export class GltfLoader {
 		return GltfLoader.buildModel(doc, binaryBuffers, options, basePath);
 	}
 
-	private static unpackGlb(bytes: Uint8Array): { doc: GltfDocument; binBuffer?: Uint8Array } {
+	private static unpackGlb(bytes: Uint8Array): {
+		doc: GltfDocument;
+		binBuffer?: Uint8Array;
+	} {
 		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 		const magic = view.getUint32(0, true);
 		const totalLength = view.getUint32(8, true);
@@ -374,7 +393,9 @@ export class GltfLoader {
 			const comma = image.uri.indexOf(",");
 			const mime = image.uri.slice(5, image.uri.indexOf(";"));
 			return {
-				bytes: new Uint8Array(Buffer.from(image.uri.slice(comma + 1), "base64")),
+				bytes: new Uint8Array(
+					Buffer.from(image.uri.slice(comma + 1), "base64"),
+				),
 				mime,
 			};
 		}
@@ -415,6 +436,12 @@ export class GltfLoader {
 						: "opaque",
 			alphaCutoff: mat.alphaMode === "MASK" ? (mat.alphaCutoff ?? 0.5) : 0,
 		};
+		const e = mat.emissiveFactor;
+		if (e && (e[0] > 0 || e[1] > 0 || e[2] > 0)) {
+			material.emissive = [e[0], e[1], e[2]];
+			material.emissiveStrength =
+				mat.extensions?.KHR_materials_emissive_strength?.emissiveStrength ?? 1;
+		}
 		const mtoon = mat.extensions?.VRMC_materials_mtoon;
 		if (mtoon) {
 			material.shading = "toon";
@@ -442,6 +469,32 @@ export class GltfLoader {
 					wrap === 33071 ? "clamp" : wrap === 33648 ? "mirror" : "repeat";
 			}
 		}
+		const mapBytes = (ref?: { index: number }) => {
+			const tex = ref ? doc.textures?.[ref.index] : undefined;
+			return tex?.source !== undefined
+				? GltfLoader.imageBytes(doc, binaryBuffers, tex.source, basePath)?.bytes
+				: undefined;
+		};
+		const normal = mapBytes(mat.normalTexture);
+		if (normal) {
+			material.normalTextureBuffer = normal;
+			material.normalScale = mat.normalTexture?.scale ?? 1;
+		}
+		const mr = mapBytes(pbr?.metallicRoughnessTexture);
+		if (mr) {
+			material.metallicRoughnessTextureBuffer = mr;
+			// With a map the factors scale it, and glTF's default factor is 1.
+			material.roughness = pbr?.roughnessFactor ?? 1;
+			material.metallic = pbr?.metallicFactor ?? 1;
+		}
+		const occlusion = mapBytes(mat.occlusionTexture);
+		if (occlusion) {
+			material.occlusionTextureBuffer = occlusion;
+			material.occlusionStrength = mat.occlusionTexture?.strength ?? 1;
+		}
+		// glTF's emissiveFactor defaults to 0: a map alone does not glow.
+		const emissiveMap = material.emissive && mapBytes(mat.emissiveTexture);
+		if (emissiveMap) material.emissiveTextureBuffer = emissiveMap;
 		return material;
 	}
 
@@ -476,8 +529,16 @@ export class GltfLoader {
 				const node = chan.target.node;
 				if (!sampler || node === undefined || chan.target.path === "weights")
 					continue;
-				const times = GltfLoader.readFloats(doc, binaryBuffers, sampler.input).data;
-				const values = GltfLoader.readFloats(doc, binaryBuffers, sampler.output).data;
+				const times = GltfLoader.readFloats(
+					doc,
+					binaryBuffers,
+					sampler.input,
+				).data;
+				const values = GltfLoader.readFloats(
+					doc,
+					binaryBuffers,
+					sampler.output,
+				).data;
 				duration = Math.max(duration, times[times.length - 1] ?? 0);
 				const track: NodeAnimationTrack3D = {
 					nodeName: nodes[node]?.name ?? `node_${node}`,
@@ -513,14 +574,21 @@ export class GltfLoader {
 		// Material keys must be unique: glTF names are optional and may repeat.
 		const materialKeys = (doc.materials ?? []).map((mat, idx, all) => {
 			const name = mat.name ?? `material_${idx}`;
-			return all.findIndex((m, j) => (m.name ?? `material_${j}`) === name) === idx
+			return all.findIndex((m, j) => (m.name ?? `material_${j}`) === name) ===
+				idx
 				? name
 				: `${name}#${idx}`;
 		});
 		const materials: Record<string, Material3D> = {};
 		(doc.materials ?? []).forEach((mat, idx) => {
 			const key = materialKeys[idx]!;
-			materials[key] = GltfLoader.buildMaterial(doc, binaryBuffers, mat, key, basePath);
+			materials[key] = GltfLoader.buildMaterial(
+				doc,
+				binaryBuffers,
+				mat,
+				key,
+				basePath,
+			);
 		});
 
 		const nodes = GltfLoader.buildNodes(doc);
@@ -528,7 +596,8 @@ export class GltfLoader {
 			joints: skin.joints,
 			inverseBindMatrices:
 				skin.inverseBindMatrices !== undefined
-					? GltfLoader.readFloats(doc, binaryBuffers, skin.inverseBindMatrices).data
+					? GltfLoader.readFloats(doc, binaryBuffers, skin.inverseBindMatrices)
+							.data
 					: Float32Array.from(
 							skin.joints.flatMap(() => Matrix4Math.identity()),
 						),
@@ -540,7 +609,9 @@ export class GltfLoader {
 			n.mesh !== undefined ? [{ mesh: n.mesh, node, skin: n.skin }] : [],
 		);
 		const instances: { mesh: number; node?: number; skin?: number }[] =
-			placed.length > 0 ? placed : (doc.meshes ?? []).map((_, mesh) => ({ mesh }));
+			placed.length > 0
+				? placed
+				: (doc.meshes ?? []).map((_, mesh) => ({ mesh }));
 
 		const model: Model3DData = {
 			name: "glTF_Model",
@@ -559,8 +630,12 @@ export class GltfLoader {
 		};
 		const rest = poseNodes(model, undefined, 0);
 
-		let minX = Infinity, minY = Infinity, minZ = Infinity;
-		let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+		let minX = Infinity,
+			minY = Infinity,
+			minZ = Infinity;
+		let maxX = -Infinity,
+			maxY = -Infinity,
+			maxZ = -Infinity;
 		const grow = (x: number, y: number, z: number) => {
 			if (x < minX) minX = x;
 			if (x > maxX) maxX = x;
@@ -577,7 +652,9 @@ export class GltfLoader {
 				if (prim.attributes.POSITION === undefined) return;
 				if (prim.mode !== undefined && prim.mode !== 4) return;
 				const read = (acc: number | undefined) =>
-					acc === undefined ? undefined : GltfLoader.readFloats(doc, binaryBuffers, acc);
+					acc === undefined
+						? undefined
+						: GltfLoader.readFloats(doc, binaryBuffers, acc);
 
 				const pos = read(prim.attributes.POSITION)!;
 				const numVerts = pos.count;
@@ -594,13 +671,18 @@ export class GltfLoader {
 				if (prim.indices !== undefined) {
 					indices = GltfLoader.readIndices(doc, binaryBuffers, prim.indices);
 				} else {
-					indices = numVerts > 65535 ? new Uint32Array(numVerts) : new Uint16Array(numVerts);
+					indices =
+						numVerts > 65535
+							? new Uint32Array(numVerts)
+							: new Uint16Array(numVerts);
 					for (let i = 0; i < numVerts; i++) indices[i] = i;
 				}
 
 				// Skinned vertices are in bind (model) space; others sit under their node.
-				const skinned = inst.skin !== undefined && prim.attributes.JOINTS_0 !== undefined;
-				const place = !skinned && inst.node !== undefined ? rest[inst.node] : undefined;
+				const skinned =
+					inst.skin !== undefined && prim.attributes.JOINTS_0 !== undefined;
+				const place =
+					!skinned && inst.node !== undefined ? rest[inst.node] : undefined;
 				for (let i = 0; i < numVerts; i++) {
 					const x = pos.data[i * 3]!;
 					const y = pos.data[i * 3 + 1]!;
@@ -615,13 +697,24 @@ export class GltfLoader {
 					id: `gltf_mesh_${inst.mesh}_${primIdx}${inst.node !== undefined ? `_n${inst.node}` : ""}`,
 					name: meshDef.name ?? `Mesh_${inst.mesh}`,
 					positions: pos.data,
-					normals: read(prim.attributes.NORMAL)?.data ?? new Float32Array(numVerts * 3),
-					uvs: read(prim.attributes.TEXCOORD_0)?.data ?? new Float32Array(numVerts * 2),
+					normals:
+						read(prim.attributes.NORMAL)?.data ??
+						new Float32Array(numVerts * 3),
+					uvs:
+						read(prim.attributes.TEXCOORD_0)?.data ??
+						new Float32Array(numVerts * 2),
 					colors: rgba,
-					jointIndices: skinned ? read(prim.attributes.JOINTS_0)?.data : undefined,
-					jointWeights: skinned ? read(prim.attributes.WEIGHTS_0)?.data : undefined,
+					jointIndices: skinned
+						? read(prim.attributes.JOINTS_0)?.data
+						: undefined,
+					jointWeights: skinned
+						? read(prim.attributes.WEIGHTS_0)?.data
+						: undefined,
 					indices,
-					materialName: prim.material !== undefined ? materialKeys[prim.material] : undefined,
+					materialName:
+						prim.material !== undefined
+							? materialKeys[prim.material]
+							: undefined,
 					node: inst.node,
 					skin: skinned ? inst.skin : undefined,
 				});
@@ -640,7 +733,12 @@ export class GltfLoader {
 			maxX = maxY = maxZ = 0;
 		}
 
-		const maxDimension = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 0.0001);
+		const maxDimension = Math.max(
+			maxX - minX,
+			maxY - minY,
+			maxZ - minZ,
+			0.0001,
+		);
 		const fit =
 			options.normalizeSize && options.normalizeSize > 0
 				? options.normalizeSize / maxDimension
@@ -674,9 +772,14 @@ export class GltfLoader {
 		model.bounds = {
 			min: lo,
 			max: hi,
-			center: [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5],
+			center: [
+				(lo[0] + hi[0]) * 0.5,
+				(lo[1] + hi[1]) * 0.5,
+				(lo[2] + hi[2]) * 0.5,
+			],
 			size: [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]],
-			boundingSphereRadius: Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 0.5,
+			boundingSphereRadius:
+				Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 0.5,
 		};
 		return model;
 	}

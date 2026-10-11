@@ -157,3 +157,56 @@ describe("FontManager Singleton & Typography Binding", () => {
 		},
 	);
 });
+
+describe.skipIf(!hasInter)("FontManager.measure", () => {
+	beforeAll(async () => {
+		await FontManager.register({
+			family: "Inter",
+			source: path.resolve(import.meta.dirname, "../../..", INTER),
+		});
+	});
+
+	it("measures width, lines and per-glyph carets with the real font", () => {
+		const m = FontManager.measure("Hello", {
+			fontFamily: "Inter",
+			fontSize: 100,
+		});
+		expect(m.lines).toBe(1);
+		expect(m.width).toBeGreaterThan(150);
+		expect(m.width).toBeLessThan(350);
+		expect(m.glyphs.map((g) => g.char).join("")).toBe("Hello");
+		expect(m.caretX(0)).toBe(m.glyphs[0].x);
+		// Carets advance monotonically and the last one sits at the ink edge.
+		for (let i = 1; i <= 5; i++) {
+			expect(m.caretX(i)).toBeGreaterThan(m.caretX(i - 1));
+		}
+		expect(Math.abs(m.caretX(5) - m.width)).toBeLessThan(2);
+		// "l" is narrower than "H" in Inter.
+		expect(m.glyphs[2].width).toBeLessThan(m.glyphs[0].width);
+	});
+
+	it("wraps to the given width and scales with font size", () => {
+		const small = FontManager.measure("Hello world", {
+			fontFamily: "Inter",
+			fontSize: 50,
+		});
+		const big = FontManager.measure("Hello world", {
+			fontFamily: "Inter",
+			fontSize: 100,
+		});
+		expect(big.width / small.width).toBeCloseTo(2, 1);
+		const wrapped = FontManager.measure("Hello world", {
+			fontFamily: "Inter",
+			fontSize: 100,
+			width: big.width * 0.6,
+		});
+		expect(wrapped.lines).toBe(2);
+		expect(wrapped.glyphs.find((g) => g.char === "w")?.line).toBe(1);
+	});
+
+	it("throws a clear error for unregistered fonts", () => {
+		expect(() => FontManager.measure("x", { fontFamily: "Nope" })).toThrow(
+			/not registered/,
+		);
+	});
+});

@@ -531,11 +531,11 @@ describe("Evaluator — Signal to Color Modulation", () => {
 		});
 		expect(c1).toBe("#ffffff");
 
-		// Signal = 0.5 -> intermediate gray
+		// Signal = 0.5 -> perceptual (OKLab L = 0.5) mid gray, not the sRGB average
 		const cMid = evaluateTrackAtFrame(track, 0, 24, {
 			signals: { sig1: 0.5 },
 		});
-		expect(cMid).toBe("#808080");
+		expect(cMid).toBe("#636363");
 	});
 
 	it("switches color abruptly with threshold mode", () => {

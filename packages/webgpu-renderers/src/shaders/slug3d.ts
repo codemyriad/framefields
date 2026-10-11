@@ -5,7 +5,8 @@
  * angle, with no intermediate texture to magnify or minify.
  */
 
-import { lighting3dWgsl } from "./lighting3d.js";
+import { lighting3dWgsl, lightsBindingsWgsl } from "./lighting3d.js";
+import { matte3dWgsl } from "./matte3d.js";
 import { slugCoverageWgsl } from "./slug.js";
 
 export const slug3dWgsl = `
@@ -16,13 +17,15 @@ struct TextModelUniforms {
 	normalMatrix   : mat4x4<f32>,
 	params         : vec4<f32>, // x = opacity, y = slant, z = twoSided (1.0 = yes), w = pull toward the eye
 	materialParams : vec4<f32>, // x = shininess, y = specularIntensity, z = ambientIntensity, w = materialMode (0=unlit, 1=lit)
+	pbr            : vec4<f32>, // x = roughness (<0 = default), y = metallic
+	emissive       : vec4<f32>, // rgb = sRGB emissive color, w = strength
 };
 
 @group(0) @binding(0) var<uniform> cam    : CameraUniforms;
 @group(1) @binding(0) var<uniform> model  : TextModelUniforms;
-@group(2) @binding(0) var curvesTex       : texture_2d<f32>;
+${matte3dWgsl(1, 1)}@group(2) @binding(0) var curvesTex       : texture_2d<f32>;
 @group(2) @binding(1) var bandsTex        : texture_2d<u32>;
-@group(3) @binding(0) var<uniform> lights : LightsUniforms;
+${lightsBindingsWgsl}
 
 ${slugCoverageWgsl}
 
@@ -119,11 +122,18 @@ fn pixelsPerUnitAlong(c: vec4<f32>, dc: vec4<f32>) -> vec2<f32> {
 	return out;
 }
 
-// Lit, premultiplied glyph colour; alpha 0 means discard.
-fn shadeText(in : VSOut, fw : vec2<f32>) -> vec4<f32> {
+struct TextFragment {
+	color : vec4<f32>, // premultiplied display color; alpha 0 = discard
+	hdr   : vec4<f32>, // premultiplied scene radiance (bloom source)
+};
+
+fn shadeText(in : VSOut, fw : vec2<f32>) -> TextFragment {
+	var out : TextFragment;
+	out.color = vec4<f32>(0.0);
+	out.hdr = vec4<f32>(0.0);
 	// One-sided text culls against its plane's normal, as one-sided quads do.
 	if (model.params.z < 0.5 && dot(in.worldNormal, cam.cameraPos.xyz - in.worldPos) < 0.0) {
-		return vec4<f32>(0.0);
+		return out;
 	}
 	let glyph = SlugGlyph(in.glyphScale, in.bandScale, in.bandMax, in.bandsTexCoords);
 	let shaded = shadeSlugGlyph(
@@ -138,19 +148,28 @@ fn shadeText(in : VSOut, fw : vec2<f32>) -> vec4<f32> {
 		in.fx.z,
 	);
 	if (shaded.a < 0.0001) {
-		return vec4<f32>(0.0);
+		return out;
 	}
-	let lit = applyLighting3D(in.worldPos, in.worldNormal, shaded.rgb / shaded.a, model.materialParams);
-	return vec4<f32>(lit * shaded.a, shaded.a);
+	let lit = shadeSurfaceFull(in.worldPos, in.worldNormal, shaded.rgb / shaded.a, model.materialParams, model.pbr, model.emissive);
+	out.color = vec4<f32>(lit.display * shaded.a, shaded.a);
+	out.hdr = vec4<f32>(lit.hdr * shaded.a, shaded.a);
+	return out;
+}
+
+fn textFragment(in : VSOut) -> TextFragment {
+	let fw = max(abs(dpdx(in.uv)) + abs(dpdy(in.uv)), vec2<f32>(0.000001));
+	let m = matteCoverage(in.pos.xy);
+	var f = shadeText(in, fw);
+	f.color *= m;
+	f.hdr *= m;
+	if (f.color.a < 0.0001) {
+		discard;
+	}
+	return f;
 }
 
 @fragment fn fs_single(in : VSOut) -> @location(0) vec4<f32> {
-	let fw = max(abs(dpdx(in.uv)) + abs(dpdy(in.uv)), vec2<f32>(0.000001));
-	let color = shadeText(in, fw);
-	if (color.a < 0.0001) {
-		discard;
-	}
-	return color;
+	return textFragment(in).color;
 }
 
 struct MrtOutput {
@@ -158,15 +177,38 @@ struct MrtOutput {
 	@location(1) depth : vec4<f32>,
 };
 
+struct BloomOutput {
+	@location(0) color : vec4<f32>,
+	@location(1) hdr   : vec4<f32>,
+};
+
+struct MrtBloomOutput {
+	@location(0) color : vec4<f32>,
+	@location(1) depth : vec4<f32>,
+	@location(2) hdr   : vec4<f32>,
+};
+
 @fragment fn fs_mrt(in : VSOut) -> MrtOutput {
-	let fw = max(abs(dpdx(in.uv)) + abs(dpdy(in.uv)), vec2<f32>(0.000001));
-	let color = shadeText(in, fw);
-	if (color.a < 0.0001) {
-		discard;
-	}
 	var out : MrtOutput;
-	out.color = color;
+	out.color = textFragment(in).color;
 	out.depth = vec4<f32>(in.linearDepth, 0.0, 0.0, 1.0);
+	return out;
+}
+
+@fragment fn fs_single_bloom(in : VSOut) -> BloomOutput {
+	let f = textFragment(in);
+	var out : BloomOutput;
+	out.color = f.color;
+	out.hdr = f.hdr;
+	return out;
+}
+
+@fragment fn fs_mrt_bloom(in : VSOut) -> MrtBloomOutput {
+	let f = textFragment(in);
+	var out : MrtBloomOutput;
+	out.color = f.color;
+	out.depth = vec4<f32>(in.linearDepth, 0.0, 0.0, 1.0);
+	out.hdr = f.hdr;
 	return out;
 }
 `;

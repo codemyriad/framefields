@@ -4,7 +4,8 @@
  * normal matrix transformations for non-uniform scaling, and linear depth MRT output.
  */
 
-import { lighting3dWgsl } from "./lighting3d.js";
+import { lighting3dWgsl, lightsBindingsWgsl } from "./lighting3d.js";
+import { matte3dWgsl } from "./matte3d.js";
 
 export const quad3dWgsl = `
 ${lighting3dWgsl}
@@ -16,13 +17,15 @@ struct ModelUniforms {
     params         : vec4<f32>, // x = opacity, y = borderRadius, z = twoSided (1.0 = yes), w = borderWidth
     dimensions     : vec4<f32>, // x = width, y = height, zw = texture extent the layer covers (0 = whole texture)
     materialParams : vec4<f32>, // x = shininess, y = specularIntensity, z = ambientIntensity, w = materialMode (0=unlit, 1=lit)
+    pbr            : vec4<f32>, // x = roughness (<0 = default), y = metallic
+    emissive       : vec4<f32>, // rgb = sRGB emissive color, w = strength
 };
 
 @group(0) @binding(0) var<uniform> cam    : CameraUniforms;
 @group(1) @binding(0) var<uniform> model  : ModelUniforms;
-@group(2) @binding(0) var texSampler      : sampler;
+${matte3dWgsl(1, 1)}@group(2) @binding(0) var texSampler      : sampler;
 @group(2) @binding(1) var mainTex         : texture_2d<f32>;
-@group(3) @binding(0) var<uniform> lights : LightsUniforms;
+${lightsBindingsWgsl}
 
 struct VertexInput {
     @location(0) position : vec3<f32>,
@@ -76,10 +79,6 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-fn calculateLighting(in: VertexOutput, isFront: bool, baseColor: vec3<f32>) -> vec3<f32> {
-    return applyLighting3D(in.worldPos, in.worldNormal, baseColor, model.materialParams);
-}
-
 fn sdRoundedRectWithNormal(p: vec2<f32>, b: vec2<f32>, r: f32) -> vec3<f32> {
     let q = abs(p) - b + vec2<f32>(r);
     let sx = select(1.0, -1.0, p.x < 0.0);
@@ -103,125 +102,124 @@ fn sdRoundedRectWithNormal(p: vec2<f32>, b: vec2<f32>, r: f32) -> vec3<f32> {
     }
 }
 
+struct QuadFragment {
+    color : vec4<f32>, // premultiplied display color
+    hdr   : vec4<f32>, // premultiplied scene radiance (bloom source)
+};
+
+fn shadeQuad(in: VertexOutput, isFront: bool) -> QuadFragment {
+    // One-sided quads cull against their declared normal, not the hardware
+    // winding: the Y-down view basis mirrors winding, so front_facing reads
+    // camera-facing quads as back faces.
+    if (model.params.z < 0.5 && dot(in.worldNormal, cam.cameraPos.xyz - in.worldPos) < 0.0) {
+        discard;
+    }
+    
+    var outerAlpha = 1.0;
+    var borderFactor = 0.0;
+    let br = model.params.y;
+    let borderWidth = model.params.w;
+    let hasDimensions = model.dimensions.x > 0.0 && model.dimensions.y > 0.0;
+    
+    if (hasDimensions) {
+        let halfSize = model.dimensions.xy * 0.5;
+        let normData = sdRoundedRectWithNormal(in.localPos, halfSize, br);
+        
+        let uvDx = dpdx(in.localPos);
+        let uvDy = dpdy(in.localPos);
+        
+        let dPdx = normData.y * uvDx.x + normData.z * uvDx.y;
+        let dPdy = normData.y * uvDy.x + normData.z * uvDy.y;
+        let gradLen = max(sqrt(dPdx * dPdx + dPdy * dPdy), 0.001);
+        
+        let distPixel = normData.x / gradLen;
+        outerAlpha = clamp(0.5 - distPixel, 0.0, 1.0);
+        if (outerAlpha <= 0.001) {
+            discard;
+        }
+        
+        if (borderWidth > 0.0 && model.borderColor.a > 0.0) {
+            let borderWidthPixel = max(borderWidth / gradLen, 0.0);
+            let innerAlpha = clamp(0.5 - (distPixel + borderWidthPixel), 0.0, 1.0);
+            borderFactor = clamp(outerAlpha - innerAlpha, 0.0, 1.0) * model.borderColor.a;
+        }
+    }
+    
+    let clampedUv = clamp(in.uv, vec2<f32>(0.0), vec2<f32>(1.0));
+    let dxUV = dpdx(in.uv);
+    let dyUV = dpdy(in.uv);
+    var texColor = textureSampleGrad(mainTex, texSampler, clampedUv, dxUV, dyUV);
+    let texAlpha = texColor.a;
+    
+    let unmultipliedRgb = select(texColor.rgb / texAlpha, texColor.rgb, texAlpha < 0.001);
+    let baseRgb = mix(unmultipliedRgb * model.colorTint.rgb, model.borderColor.rgb, borderFactor);
+    let alpha = mix(texAlpha, 1.0, borderFactor) * model.params.x * model.colorTint.a * outerAlpha * matteCoverage(in.clipPos.xy);
+    if (alpha <= 0.001) {
+        discard;
+    }
+    
+    let shaded = shadeSurfaceFull(in.worldPos, in.worldNormal, baseRgb, model.materialParams, model.pbr, model.emissive);
+    var out: QuadFragment;
+    out.color = vec4<f32>(shaded.display * alpha, alpha);
+    out.hdr = vec4<f32>(shaded.hdr * alpha, alpha);
+    return out;
+}
+
 struct MrtOutput {
     @location(0) color : vec4<f32>,
     @location(1) depth : vec4<f32>,
 };
 
+struct BloomOutput {
+    @location(0) color : vec4<f32>,
+    @location(1) hdr   : vec4<f32>,
+};
+
+struct MrtBloomOutput {
+    @location(0) color : vec4<f32>,
+    @location(1) depth : vec4<f32>,
+    @location(2) hdr   : vec4<f32>,
+};
+
+@fragment
+fn fs_single(in: VertexOutput, @builtin(front_facing) isFront: bool) -> @location(0) vec4<f32> {
+    return shadeQuad(in, isFront).color;
+}
+
 @fragment
 fn fs_mrt(in: VertexOutput, @builtin(front_facing) isFront: bool) -> MrtOutput {
-    // One-sided quads cull against their declared normal, not the hardware
-    // winding: the Y-down view basis mirrors winding, so front_facing reads
-    // camera-facing quads as back faces.
-    if (model.params.z < 0.5 && dot(in.worldNormal, cam.cameraPos.xyz - in.worldPos) < 0.0) {
-        discard;
-    }
-    
-    var outerAlpha = 1.0;
-    var borderFactor = 0.0;
-    let br = model.params.y;
-    let borderWidth = model.params.w;
-    let hasDimensions = model.dimensions.x > 0.0 && model.dimensions.y > 0.0;
-    
-    if (hasDimensions) {
-        let halfSize = model.dimensions.xy * 0.5;
-        let normData = sdRoundedRectWithNormal(in.localPos, halfSize, br);
-        
-        let uvDx = dpdx(in.localPos);
-        let uvDy = dpdy(in.localPos);
-        
-        let dPdx = normData.y * uvDx.x + normData.z * uvDx.y;
-        let dPdy = normData.y * uvDy.x + normData.z * uvDy.y;
-        let gradLen = max(sqrt(dPdx * dPdx + dPdy * dPdy), 0.001);
-        
-        let distPixel = normData.x / gradLen;
-        outerAlpha = clamp(0.5 - distPixel, 0.0, 1.0);
-        if (outerAlpha <= 0.001) {
-            discard;
-        }
-        
-        if (borderWidth > 0.0 && model.borderColor.a > 0.0) {
-            let borderWidthPixel = max(borderWidth / gradLen, 0.0);
-            let innerAlpha = clamp(0.5 - (distPixel + borderWidthPixel), 0.0, 1.0);
-            borderFactor = clamp(outerAlpha - innerAlpha, 0.0, 1.0) * model.borderColor.a;
-        }
-    }
-    
-    let clampedUv = clamp(in.uv, vec2<f32>(0.0), vec2<f32>(1.0));
-    let dxUV = dpdx(in.uv);
-    let dyUV = dpdy(in.uv);
-    var texColor = textureSampleGrad(mainTex, texSampler, clampedUv, dxUV, dyUV);
-    let texAlpha = texColor.a;
-    
-    let unmultipliedRgb = select(texColor.rgb / texAlpha, texColor.rgb, texAlpha < 0.001);
-    let baseRgb = mix(unmultipliedRgb * model.colorTint.rgb, model.borderColor.rgb, borderFactor);
-    let alpha = mix(texAlpha, 1.0, borderFactor) * model.params.x * model.colorTint.a * outerAlpha;
-    if (alpha <= 0.001) {
-        discard;
-    }
-    
-    let litRgb = calculateLighting(in, isFront, baseRgb);
-    let premulColor = vec4<f32>(litRgb * alpha, alpha);
-    
     var out: MrtOutput;
-    out.color = premulColor;
+    out.color = shadeQuad(in, isFront).color;
     out.depth = vec4<f32>(in.linearDepth, 0.0, 0.0, 1.0);
     return out;
 }
 
 @fragment
-fn fs_single(in: VertexOutput, @builtin(front_facing) isFront: bool) -> @location(0) vec4<f32> {
-    // One-sided quads cull against their declared normal, not the hardware
-    // winding: the Y-down view basis mirrors winding, so front_facing reads
-    // camera-facing quads as back faces.
-    if (model.params.z < 0.5 && dot(in.worldNormal, cam.cameraPos.xyz - in.worldPos) < 0.0) {
-        discard;
-    }
-    
-    var outerAlpha = 1.0;
-    var borderFactor = 0.0;
-    let br = model.params.y;
-    let borderWidth = model.params.w;
-    let hasDimensions = model.dimensions.x > 0.0 && model.dimensions.y > 0.0;
-    
-    if (hasDimensions) {
-        let halfSize = model.dimensions.xy * 0.5;
-        let normData = sdRoundedRectWithNormal(in.localPos, halfSize, br);
-        
-        let uvDx = dpdx(in.localPos);
-        let uvDy = dpdy(in.localPos);
-        
-        let dPdx = normData.y * uvDx.x + normData.z * uvDx.y;
-        let dPdy = normData.y * uvDy.x + normData.z * uvDy.y;
-        let gradLen = max(sqrt(dPdx * dPdx + dPdy * dPdy), 0.001);
-        
-        let distPixel = normData.x / gradLen;
-        outerAlpha = clamp(0.5 - distPixel, 0.0, 1.0);
-        if (outerAlpha <= 0.001) {
-            discard;
-        }
-        
-        if (borderWidth > 0.0 && model.borderColor.a > 0.0) {
-            let borderWidthPixel = max(borderWidth / gradLen, 0.0);
-            let innerAlpha = clamp(0.5 - (distPixel + borderWidthPixel), 0.0, 1.0);
-            borderFactor = clamp(outerAlpha - innerAlpha, 0.0, 1.0) * model.borderColor.a;
-        }
-    }
-    
+fn fs_single_bloom(in: VertexOutput, @builtin(front_facing) isFront: bool) -> BloomOutput {
+    let f = shadeQuad(in, isFront);
+    var out: BloomOutput;
+    out.color = f.color;
+    out.hdr = f.hdr;
+    return out;
+}
+
+@fragment
+fn fs_mrt_bloom(in: VertexOutput, @builtin(front_facing) isFront: bool) -> MrtBloomOutput {
+    let f = shadeQuad(in, isFront);
+    var out: MrtBloomOutput;
+    out.color = f.color;
+    out.depth = vec4<f32>(in.linearDepth, 0.0, 0.0, 1.0);
+    out.hdr = f.hdr;
+    return out;
+}
+
+// Shadow-map pass: depth only, alpha-tested so a cut-out casts its shape.
+@fragment
+fn fs_shadow(in: VertexOutput) {
     let clampedUv = clamp(in.uv, vec2<f32>(0.0), vec2<f32>(1.0));
-    let dxUV = dpdx(in.uv);
-    let dyUV = dpdy(in.uv);
-    var texColor = textureSampleGrad(mainTex, texSampler, clampedUv, dxUV, dyUV);
-    let texAlpha = texColor.a;
-    
-    let unmultipliedRgb = select(texColor.rgb / texAlpha, texColor.rgb, texAlpha < 0.001);
-    let baseRgb = mix(unmultipliedRgb * model.colorTint.rgb, model.borderColor.rgb, borderFactor);
-    let alpha = mix(texAlpha, 1.0, borderFactor) * model.params.x * model.colorTint.a * outerAlpha;
-    if (alpha <= 0.001) {
+    let a = textureSampleLevel(mainTex, texSampler, clampedUv, 0.0).a * model.params.x * model.colorTint.a;
+    if (a < 0.5) {
         discard;
     }
-    
-    let litRgb = calculateLighting(in, isFront, baseRgb);
-    return vec4<f32>(litRgb * alpha, alpha);
 }
 `;

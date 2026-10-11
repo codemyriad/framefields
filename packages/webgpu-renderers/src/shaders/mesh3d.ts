@@ -1,22 +1,17 @@
 /**
  * WebGPU WGSL shaders for 3D static and skinned meshes.
  * Supports GPU Linear Blend Skinning (up to 128 bones),
- * Multi-Light Blinn-Phong illumination (Ambient, Directional, Point, Spot) or toon shading,
+ * the shared 3D surface shading (Blinn-Phong, or physical GGX + image-based light
+ * in scenes with an environment) or toon shading, shadow maps, emissive,
  * alpha-cutoff (glTF MASK) materials,
  * Material parameters, normal transformations, and linear depth MRT output for Bokeh DoF.
  */
 
+import { lighting3dWgsl, lightsBindingsWgsl } from "./lighting3d.js";
+import { matte3dWgsl } from "./matte3d.js";
+
 export const mesh3dWgsl = `
-struct CameraUniforms {
-    viewMatrix        : mat4x4<f32>,
-    projMatrix        : mat4x4<f32>,
-    viewProjMatrix    : mat4x4<f32>,
-    invViewProjMatrix : mat4x4<f32>,
-    cameraPos         : vec4<f32>, // xyz = eye, w = near
-    cameraDir         : vec4<f32>, // xyz = forward, w = far
-    dofParams         : vec4<f32>, // x = focusDistance, y = fStop, z = maxBlurRadius, w = dofEnabled
-    screenParams      : vec4<f32>, // x = surfaceWidth, y = surfaceHeight, z = time, w = unused
-};
+${lighting3dWgsl}
 
 struct ModelUniforms {
     modelMatrix    : mat4x4<f32>,
@@ -25,31 +20,25 @@ struct ModelUniforms {
     params         : vec4<f32>, // x = opacity, y = twoSided (1.0 = yes), z = isSkinned (1.0 = yes), w = wireframe
     materialParams : vec4<f32>, // x = shininess, y = specularIntensity, z = ambientIntensity, w = materialMode (0=unlit, 1=lit, 2=toon)
     shade          : vec4<f32>, // rgb = toon shadow-side color multiplier, a = alpha cutoff (0 = none)
+    pbr            : vec4<f32>, // x = roughness (<0 = default), y = metallic
+    emissive       : vec4<f32>, // rgb = sRGB emissive color, w = strength
+    maps           : vec4<f32>, // x = normal scale (0 = no map), y = occlusion strength, z = has metallic-roughness map, w = has emissive map
 };
 
 struct SkinningUniforms {
     jointMatrices : array<mat4x4<f32>, 128>,
 };
 
-struct GPULight {
-    posType        : vec4<f32>, // xyz = position, w = type (0=ambient, 1=directional, 2=point, 3=spot)
-    dirRadius      : vec4<f32>, // xyz = normalized direction, w = radius / range
-    colorIntensity : vec4<f32>, // rgb = linear color, w = intensity
-    spotParams     : vec4<f32>, // x = cos(outer), y = cos(inner), z = decay, w = unused
-};
-
-struct LightsUniforms {
-    ambientColor : vec4<f32>, // rgb = ambient color * intensity, w = unused
-    params       : vec4<f32>, // x = numLights, y = hasLights (1.0 = lit, 0.0 = unlit), z = unused, w = unused
-    lights       : array<GPULight, 8>,
-};
-
 @group(0) @binding(0) var<uniform> cam      : CameraUniforms;
 @group(1) @binding(0) var<uniform> model    : ModelUniforms;
 @group(1) @binding(1) var<uniform> skinning : SkinningUniforms;
-@group(2) @binding(0) var texSampler        : sampler;
+${matte3dWgsl(1, 2)}@group(2) @binding(0) var texSampler        : sampler;
 @group(2) @binding(1) var mainTex           : texture_2d<f32>;
-@group(3) @binding(0) var<uniform> lights   : LightsUniforms;
+@group(2) @binding(2) var normalTex         : texture_2d<f32>;
+@group(2) @binding(3) var metalRoughTex     : texture_2d<f32>;
+@group(2) @binding(4) var occlusionTex      : texture_2d<f32>;
+@group(2) @binding(5) var emissiveTex       : texture_2d<f32>;
+${lightsBindingsWgsl}
 
 struct VertexInput {
     @location(0) position : vec3<f32>,
@@ -145,88 +134,88 @@ fn toonLighting(in: VertexOutput, baseColor: vec3<f32>) -> vec3<f32> {
     return baseColor * mix(model.shade.rgb, vec3<f32>(1.0), lit);
 }
 
-fn calculateLighting(in: VertexOutput, isFront: bool, baseColor: vec3<f32>) -> vec3<f32> {
-    if (lights.params.y < 0.5 || model.materialParams.w < 0.5) {
-        return baseColor;
+struct MeshFragment {
+    color : vec4<f32>, // premultiplied display color
+    hdr   : vec4<f32>, // premultiplied scene radiance (bloom source)
+};
+
+// Normal mapping without tangents: a cotangent frame from screen-space
+// derivatives (Schüler, "Followup: Normal Mapping Without Precomputed Tangents").
+fn perturbNormal(N: vec3<f32>, p: vec3<f32>, uv: vec2<f32>, tn: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, duv1: vec2<f32>, duv2: vec2<f32>) -> vec3<f32> {
+    let dp2perp = cross(dp2, N);
+    let dp1perp = cross(N, dp1);
+    // The derivation assumes cross(dp1, dp2) points along N; with this
+    // engine's y-down view basis it can point away, mirroring the frame.
+    let handed = select(1.0, -1.0, dot(cross(dp1, dp2), N) < 0.0);
+    let T = (dp2perp * duv1.x + dp1perp * duv2.x) * handed;
+    let B = (dp2perp * duv1.y + dp1perp * duv2.y) * handed;
+    let invmax = inverseSqrt(max(max(dot(T, T), dot(B, B)), 1e-20));
+    // glTF maps are +Y up while v grows down the image: green points along -B.
+    return normalize(T * (tn.x * invmax) - B * (tn.y * invmax) + N * tn.z);
+}
+
+fn shadeMesh(in: VertexOutput, isFront: bool) -> MeshFragment {
+    // Every sample and derivative up front, in uniform control flow.
+    var texColor = textureSample(mainTex, texSampler, in.uv);
+    let normalSample = textureSample(normalTex, texSampler, in.uv).xyz;
+    let mrSample = textureSample(metalRoughTex, texSampler, in.uv);
+    let aoSample = textureSample(occlusionTex, texSampler, in.uv).r;
+    let emissiveSample = textureSample(emissiveTex, texSampler, in.uv).rgb;
+    let dp1 = dpdx(in.worldPos);
+    let dp2 = dpdy(in.worldPos);
+    let duv1 = dpdx(in.uv);
+    let duv2 = dpdy(in.uv);
+
+    if (!isFront && model.params.y < 0.5) {
+        discard;
     }
+    if (texColor.a < model.shade.a) {
+        discard;
+    }
+    let alpha = texColor.a * model.params.x * model.colorTint.a * matteCoverage(in.clipPos.xy);
+    if (alpha <= 0.001) {
+        discard;
+    }
+
+    let baseRgb = texColor.rgb * model.colorTint.rgb;
+    var out: MeshFragment;
     if (model.materialParams.w > 1.5) {
-        return toonLighting(in, baseColor);
+        var toon = baseRgb;
+        if (lights.params.y >= 0.5) {
+            toon = toonLighting(in, baseRgb);
+        }
+        out.color = vec4<f32>(toon * alpha, alpha);
+        out.hdr = vec4<f32>(srgbToLinear(toon) * alpha, alpha);
+        return out;
     }
 
     var N = normalize(in.worldNormal);
-    let V = normalize(cam.cameraPos.xyz - in.worldPos);
-    if (dot(N, V) < 0.0) {
-        N = -N;
+    if (model.maps.x > 0.0) {
+        var tn = normalSample * 2.0 - 1.0;
+        tn = vec3<f32>(tn.xy * model.maps.x, tn.z);
+        // The frame follows the surface side the camera sees.
+        var Nf = N;
+        if (dot(Nf, cam.cameraPos.xyz - in.worldPos) < 0.0) {
+            Nf = -Nf;
+        }
+        N = perturbNormal(Nf, in.worldPos, in.uv, tn, dp1, dp2, duv1, duv2);
     }
-
-    let shininess = max(1.0, model.materialParams.x);
-    let specularInt = model.materialParams.y;
-    let ambientInt = model.materialParams.z;
-
-    var totalIllumination = baseColor * (lights.ambientColor.rgb * ambientInt);
-
-    let numLights = i32(lights.params.x);
-    for (var i = 0; i < 8; i++) {
-        if (i >= numLights) {
-            break;
-        }
-        let light = lights.lights[i];
-        let lightType = light.posType.w;
-        let lightColor = light.colorIntensity.rgb;
-        let intensity = light.colorIntensity.w;
-
-        var L = vec3<f32>(0.0, 0.0, 1.0);
-        var attenuation = 1.0;
-
-        if (lightType > 0.5 && lightType < 1.5) {
-            // Directional Light
-            L = normalize(-light.dirRadius.xyz);
-        } else if (lightType >= 1.5) {
-            // Point or Spot Light
-            let toLight = light.posType.xyz - in.worldPos;
-            let dist = length(toLight);
-            let radius = max(1.0, light.dirRadius.w);
-            if (dist > radius) {
-                continue;
-            }
-            L = normalize(toLight);
-
-            let dNorm = clamp(dist / radius, 0.0, 1.0);
-            let decay = max(0.5, light.spotParams.z);
-            attenuation = pow(clamp(1.0 - dNorm, 0.0, 1.0), decay);
-
-            if (lightType > 2.5) {
-                // Spot Light
-                let spotDir = normalize(light.dirRadius.xyz);
-                let cosAngle = dot(-L, spotDir);
-                let cosOuter = light.spotParams.x;
-                let cosInner = light.spotParams.y;
-
-                if (cosAngle < cosOuter) {
-                    continue;
-                }
-                let spotFalloff = smoothstep(cosOuter, cosInner, cosAngle);
-                attenuation *= spotFalloff;
-            }
-        } else {
-            continue;
-        }
-
-        let NdotL = max(dot(N, L), 0.0);
-        let diffuse = baseColor * lightColor * (NdotL * intensity * attenuation);
-
-        var specular = vec3<f32>(0.0);
-        if (NdotL > 0.0 && specularInt > 0.001) {
-            let H = normalize(L + V);
-            let NdotH = max(dot(N, H), 0.0);
-            let specFactor = pow(NdotH, shininess);
-            specular = lightColor * (specFactor * specularInt * intensity * attenuation);
-        }
-
-        totalIllumination += diffuse + specular;
+    var pbr = model.pbr;
+    if (model.maps.z > 0.5) {
+        pbr.x = select(pbr.x, 1.0, pbr.x < 0.0) * mrSample.g;
+        pbr.y = pbr.y * mrSample.b;
     }
-
-    return totalIllumination;
+    var material = model.materialParams;
+    material.z = material.z * mix(1.0, aoSample, clamp(model.maps.y, 0.0, 1.0));
+    var emissive = model.emissive;
+    if (model.maps.w > 0.5) {
+        // Linear multiply in display space is close enough for an 8-bit map.
+        emissive = vec4<f32>(emissive.rgb * emissiveSample, emissive.w);
+    }
+    let shaded = shadeSurfaceFull(in.worldPos, N, baseRgb, material, pbr, emissive);
+    out.color = vec4<f32>(shaded.display * alpha, alpha);
+    out.hdr = vec4<f32>(shaded.hdr * alpha, alpha);
+    return out;
 }
 
 struct MrtOutput {
@@ -234,48 +223,46 @@ struct MrtOutput {
     @location(1) depth : vec4<f32>,
 };
 
+struct BloomOutput {
+    @location(0) color : vec4<f32>,
+    @location(1) hdr   : vec4<f32>,
+};
+
+struct MrtBloomOutput {
+    @location(0) color : vec4<f32>,
+    @location(1) depth : vec4<f32>,
+    @location(2) hdr   : vec4<f32>,
+};
+
+@fragment
+fn fs_single(in: VertexOutput, @builtin(front_facing) isFront: bool) -> @location(0) vec4<f32> {
+    return shadeMesh(in, isFront).color;
+}
+
 @fragment
 fn fs_mrt(in: VertexOutput, @builtin(front_facing) isFront: bool) -> MrtOutput {
-    if (!isFront && model.params.y < 0.5) {
-        discard;
-    }
-
-    var texColor = textureSample(mainTex, texSampler, in.uv);
-    if (texColor.a < model.shade.a) {
-        discard;
-    }
-    let alpha = texColor.a * model.params.x * model.colorTint.a;
-    if (alpha <= 0.001) {
-        discard;
-    }
-
-    let baseRgb = texColor.rgb * model.colorTint.rgb;
-    let litRgb = calculateLighting(in, isFront, baseRgb);
-    let premulColor = vec4<f32>(litRgb * alpha, alpha);
-
     var out: MrtOutput;
-    out.color = premulColor;
+    out.color = shadeMesh(in, isFront).color;
     out.depth = vec4<f32>(in.linearDepth, 0.0, 0.0, 1.0);
     return out;
 }
 
 @fragment
-fn fs_single(in: VertexOutput, @builtin(front_facing) isFront: bool) -> @location(0) vec4<f32> {
-    if (!isFront && model.params.y < 0.5) {
-        discard;
-    }
+fn fs_single_bloom(in: VertexOutput, @builtin(front_facing) isFront: bool) -> BloomOutput {
+    let f = shadeMesh(in, isFront);
+    var out: BloomOutput;
+    out.color = f.color;
+    out.hdr = f.hdr;
+    return out;
+}
 
-    var texColor = textureSample(mainTex, texSampler, in.uv);
-    if (texColor.a < model.shade.a) {
-        discard;
-    }
-    let alpha = texColor.a * model.params.x * model.colorTint.a;
-    if (alpha <= 0.001) {
-        discard;
-    }
-
-    let baseRgb = texColor.rgb * model.colorTint.rgb;
-    let litRgb = calculateLighting(in, isFront, baseRgb);
-    return vec4<f32>(litRgb * alpha, alpha);
+@fragment
+fn fs_mrt_bloom(in: VertexOutput, @builtin(front_facing) isFront: bool) -> MrtBloomOutput {
+    let f = shadeMesh(in, isFront);
+    var out: MrtBloomOutput;
+    out.color = f.color;
+    out.depth = vec4<f32>(in.linearDepth, 0.0, 0.0, 1.0);
+    out.hdr = f.hdr;
+    return out;
 }
 `;

@@ -1,12 +1,15 @@
+import { gradientWgsl } from "./gradient.js";
+
 export const shapeFillWgsl = `
+${gradientWgsl}
+
 struct Uniforms {
     transformCol0 : vec4<f32>,
     transformCol1 : vec4<f32>,
     transformCol2 : vec4<f32>,
-    params        : vec4<f32>, // x = opacity, y = surfaceWidth, z = surfaceHeight, w = fillType (0=solid, 1=linear, 2=radial)
-    color         : vec4<f32>, // solid color or gradient start
-    color2        : vec4<f32>, // gradient end
-    gradCoords    : vec4<f32>, // linear: (x0, y0, x1, y1), radial: (cx, cy, radius, unused)
+    params        : vec4<f32>, // x = opacity, y = surfaceWidth, z = surfaceHeight, w = unused
+    color         : vec4<f32>, // solid color (gradient.info.x = 0)
+    gradient      : GradientUniforms,
 };
 
 @group(0) @binding(0) var<uniform> u : Uniforms;
@@ -29,23 +32,8 @@ struct VSOut {
 
 @fragment fn fs(in : VSOut) -> @location(0) vec4<f32> {
     var outColor = u.color;
-    let fillType = u.params.w;
-    
-    if (fillType > 0.5 && fillType < 1.5) {
-        // Linear gradient between p0 and p1
-        let p0 = u.gradCoords.xy;
-        let p1 = u.gradCoords.zw;
-        let d = p1 - p0;
-        let lenSq = dot(d, d);
-        let t = clamp(dot(in.localPos - p0, d) / max(lenSq, 1e-6), 0.0, 1.0);
-        outColor = mix(u.color, u.color2, t);
-    } else if (fillType >= 1.5) {
-        // Radial gradient from center out to radius
-        let center = u.gradCoords.xy;
-        let radius = max(u.gradCoords.z, 1e-6);
-        let dist = length(in.localPos - center);
-        let t = clamp(dist / radius, 0.0, 1.0);
-        outColor = mix(u.color, u.color2, t);
+    if (u.gradient.info.x > 0.5) {
+        outColor = evalGradient(u.gradient, in.localPos);
     }
     
     let alpha = outColor.a * u.params.x;
