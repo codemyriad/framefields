@@ -14,8 +14,6 @@
 [![gpu](https://img.shields.io/badge/GPU-Dawn%20%C2%B7%20Metal%20%C2%B7%20Vulkan-8b5cf6)](#monorepo-architecture)
 [![vision](https://img.shields.io/badge/vision-RTMDet%20%C2%B7%20RTMO%20%C2%B7%20ONNX-ff5a1f)](#6-on-device-vision--tracking)
 
-> **⚠️ Beta:** framefields is under active development. APIs may change between releases and some features may be incomplete or unstable.
-
 Framefields is built for coding agents. It packs the work people usually split across three desktop apps (Photoshop-inspired compositing and VFX, After Effects-style motion, typography and keyframing, and Blender-style 3D scenes, cameras and models) into one lightweight npm package. Your agent writes a TypeScript composition, checks frames, and renders an MP4, and nobody has to install or license a multi-gigabyte creative suite.
 
 **Code-first video as pure software engineering** — no headless browser, no DOM reflow, no screenshot pipeline.
